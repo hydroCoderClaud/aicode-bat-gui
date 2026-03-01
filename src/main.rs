@@ -94,19 +94,22 @@ impl LauncherApp {
     fn new() -> Self {
         let config_mgr = config::ConfigManager::new(resolve_config_path());
 
-        // 优先级：命令行参数(%V，右键菜单) > cwd(终端启动) > 配置记录的上次目录
-        let exe_dir = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p| p.to_string_lossy().to_string()))
-            .unwrap_or_default();
+        // 优先级：命令行参数(%V，右键菜单) > cwd(任何合法目录) > 配置记录的上次目录
+        // 注：右键 exe 直接打开时 Explorer 会把 CWD 设为 exe 所在目录，这是合法的工作目录；
+        //     只排除 Windows 系统目录（从开始菜单启动时 CWD 可能为 System32 等）
         let arg_dir = std::env::args().nth(1)
             .filter(|p| std::path::Path::new(p).is_dir());
         let cwd = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
+        let cwd_is_sys = {
+            let lower = cwd.to_lowercase().replace('/', "\\");
+            lower.contains("\\windows\\system32")
+                || lower.contains("\\windows\\syswow64")
+        };
         let last_dir = if let Some(d) = arg_dir {
             d
-        } else if !cwd.is_empty() && cwd != exe_dir {
+        } else if !cwd.is_empty() && !cwd_is_sys {
             cwd
         } else {
             config_mgr.data.global.last_directory.clone()
