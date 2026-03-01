@@ -539,7 +539,11 @@ impl eframe::App for LauncherApp {
         if do_new {
             let tool = self.config_mgr.data.tools.first()
                 .map(|t| t.command.clone()).unwrap_or_default();
-            let dir  = self.config_mgr.data.global.last_directory.clone();
+            // 优先使用当前表单中的目录，回退到配置文件记录的目录
+            let dir = self.form.as_ref()
+                .map(|f| f.directory.clone())
+                .filter(|d| !d.is_empty())
+                .unwrap_or_else(|| self.config_mgr.data.global.last_directory.clone());
             self.selected_id    = String::new();
             self.pending_delete = false;
             self.form = Some(EditForm {
@@ -553,7 +557,11 @@ impl eframe::App for LauncherApp {
 
         if let Some(id) = select_id {
             if let Some(cfg) = self.config_mgr.find_config(&id).cloned() {
-                let dir = self.config_mgr.data.global.last_directory.clone();
+                // 优先使用当前表单中的目录（右键打开时已正确设置），回退到配置文件记录的目录
+                let dir = self.form.as_ref()
+                    .map(|f| f.directory.clone())
+                    .filter(|d| !d.is_empty())
+                    .unwrap_or_else(|| self.config_mgr.data.global.last_directory.clone());
                 self.selected_id    = id;
                 self.pending_delete = false;
                 self.status         = format!("当前：{}", cfg.name);
@@ -563,7 +571,10 @@ impl eframe::App for LauncherApp {
 
         if let Some(id) = launch_id {
             if let Some(cfg) = self.config_mgr.find_config(&id).cloned() {
-                let dir = self.config_mgr.data.global.last_directory.clone();
+                let dir = self.form.as_ref()
+                    .map(|f| f.directory.clone())
+                    .filter(|d| !d.is_empty())
+                    .unwrap_or_else(|| self.config_mgr.data.global.last_directory.clone());
                 self.selected_id = id;
                 self.form        = Some(cfg_to_form(&cfg, &dir));
                 self.launch();
