@@ -421,24 +421,16 @@ impl eframe::App for LauncherApp {
                         egui::CollapsingHeader::new("📋 常用环境变量参考")
                             .default_open(false)
                             .show(ui, |ui| {
-                                let vars = [
-                                    ("ANTHROPIC_MODEL",                  "Claude - 覆盖默认模型"),
-                                    ("ANTHROPIC_DEFAULT_OPUS_MODEL",     "Claude - 映射 Opus 到指定模型"),
-                                    ("ANTHROPIC_DEFAULT_SONNET_MODEL",   "Claude - 映射 Sonnet 到指定模型"),
-                                    ("ANTHROPIC_DEFAULT_HAIKU_MODEL",    "Claude - 映射 Haiku 到指定模型"),
-                                    ("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE",  "Claude - 上下文压缩触发百分比（0-100）"),
-                                    ("OPENAI_MODEL",                     "Qwen/OpenAI 兼容 - 覆盖默认模型"),
-                                    ("GEMINI_MODEL",                     "Gemini - 覆盖默认模型"),
-                                ];
-                                egui::Grid::new("env_help").num_columns(2).spacing([8.0, 2.0]).show(ui, |ui| {
-                                    for (k, desc) in &vars {
-                                        ui.add(egui::Label::new(
-                                            egui::RichText::new(*k).monospace().weak()
-                                        ));
-                                        ui.label(*desc);
-                                        ui.end_row();
-                                    }
-                                });
+                                ui.label(egui::RichText::new("格式：KEY=描述（每行一条）").small().weak());
+                                let resp = ui.add(
+                                    egui::TextEdit::multiline(&mut self.config_mgr.data.env_hints)
+                                        .desired_width(f32::INFINITY)
+                                        .desired_rows(8)
+                                        .font(egui::TextStyle::Monospace),
+                                );
+                                if resp.changed() {
+                                    let _ = self.config_mgr.save();
+                                }
                             });
                         ui.add_space(4.0);
 

@@ -37,11 +37,24 @@ pub struct Global {
     pub test_timeout_secs: u64,
 }
 
+fn default_env_hints() -> String {
+    "ANTHROPIC_MODEL=Claude - 覆盖默认模型\n\
+     ANTHROPIC_DEFAULT_OPUS_MODEL=Claude - 映射 Opus 到指定模型\n\
+     ANTHROPIC_DEFAULT_SONNET_MODEL=Claude - 映射 Sonnet 到指定模型\n\
+     ANTHROPIC_DEFAULT_HAIKU_MODEL=Claude - 映射 Haiku 到指定模型\n\
+     CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=Claude - 上下文压缩触发百分比（0-100）\n\
+     OPENAI_MODEL=Qwen/OpenAI 兼容 - 覆盖默认模型\n\
+     GEMINI_MODEL=Gemini - 覆盖默认模型"
+        .to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LauncherConfigData {
     pub global: Global,
     pub tools: Vec<Tool>,
     pub configs: Vec<Config>,
+    #[serde(default = "default_env_hints")]
+    pub env_hints: String,
 }
 
 /// 配置管理器
@@ -62,6 +75,7 @@ impl ConfigManager {
                 },
                 tools: vec![],
                 configs: vec![],
+                env_hints: default_env_hints(),
             },
             config_path,
         };
