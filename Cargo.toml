@@ -1,0 +1,31 @@
+[package]
+name = "aicode-bat-gui"
+version = "0.1.0"
+description = "AI Code CLI Launcher"
+edition = "2021"
+
+[[bin]]
+name = "aicode-bat-gui"
+path = "src/main.rs"
+
+[dependencies]
+eframe  = { version = "0.29", default-features = false, features = ["default_fonts", "glow"] }
+egui    = "0.29"
+rfd     = "0.14"
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+reqwest     = { version = "0.12", features = ["json", "socks"] }
+tokio       = { version = "1", features = ["rt", "rt-multi-thread"] }
+uuid        = { version = "1", features = ["v4"] }
+dirs        = "5"
+
+[target.'cfg(windows)'.dependencies]
+winreg      = "0.52"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[profile.release]
+opt-level = 3
+lto       = true
+strip     = true

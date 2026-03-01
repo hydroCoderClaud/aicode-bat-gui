@@ -1,0 +1,15 @@
+# Rust 编译产物
+/target/
+
+# 发布目录（含 exe 和带密钥的配置文件）
+/exe/
+
+# 配置文件含 API 密钥，不提交
+launcher_config.json
+
+# Claude Code 本地设置
+.claude/
+
+# 系统文件
+.DS_Store
+Thumbs.db
