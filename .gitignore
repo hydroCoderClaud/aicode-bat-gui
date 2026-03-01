@@ -1,5 +1,5 @@
-# Rust 编译产物
-/target/
+# Rust 编译产物（任意层级）
+target/
 
 # 发布目录（含 exe 和带密钥的配置文件）
 /exe/
