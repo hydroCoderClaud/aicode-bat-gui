@@ -7,15 +7,67 @@ mod launcher;
 use eframe::egui;
 use std::collections::HashMap;
 use std::sync::mpsc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// ── Win32 FFI：用于隐藏/显示窗口 ────────────────────────────────────────────
+#[cfg(windows)]
+extern "system" {
+    fn FindWindowW(class: *const u16, title: *const u16) -> isize;
+    fn ShowWindow(hwnd: isize, cmd: i32) -> i32;
+    fn SetForegroundWindow(hwnd: isize) -> i32;
+    fn CreateMutexW(attrs: *const u8, owner: i32, name: *const u16) -> isize;
+    fn GetLastError() -> u32;
+}
+#[cfg(windows)]
+const SW_HIDE: i32 = 0;
+#[cfg(windows)]
+const SW_SHOW: i32 = 5;
+#[cfg(windows)]
+const ERROR_ALREADY_EXISTS: u32 = 183;
 
 // ── 入口 ─────────────────────────────────────────────────────────────────────
 
 fn main() -> eframe::Result {
+    // 单实例检测：用命名 Mutex 确保只有一个实例运行
+    #[cfg(windows)]
+    {
+        let name: Vec<u16> = "Global\\aicode-bat-gui-single-instance\0".encode_utf16().collect();
+        unsafe {
+            let _handle = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
+            if GetLastError() == ERROR_ALREADY_EXISTS {
+                // 已有实例运行，激活其窗口后退出
+                let title: Vec<u16> = "CLI 启动管理器\0".encode_utf16().collect();
+                let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
+                if hwnd != 0 {
+                    ShowWindow(hwnd, SW_SHOW);
+                    SetForegroundWindow(hwnd);
+                }
+                std::process::exit(0);
+            }
+            // _handle 故意不关闭，进程结束时自动释放
+        }
+    }
+
+    // 加载窗口图标
+    let icon_data = image::load_from_memory(include_bytes!("../assets/app.ico"))
+        .map(|img| {
+            let rgba = img.to_rgba8();
+            let (w, h) = (rgba.width(), rgba.height());
+            egui::IconData { rgba: rgba.into_raw(), width: w, height: h }
+        })
+        .ok();
+
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("CLI 启动管理器")
+        .with_inner_size([860.0, 600.0])
+        .with_min_inner_size([640.0, 420.0]);
+    if let Some(icon) = icon_data {
+        viewport = viewport.with_icon(Arc::new(icon));
+    }
+
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("CLI 启动管理器")
-            .with_inner_size([860.0, 600.0])
-            .with_min_inner_size([640.0, 420.0]),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(
@@ -60,6 +112,12 @@ struct LauncherApp {
     test_rx:        Option<mpsc::Receiver<Result<String, String>>>,
     show_tool_mgr:  bool,
     new_tool_form:  NewToolForm,
+    // 系统托盘
+    tray_icon:      Option<tray_icon::TrayIcon>,
+    menu_show_id:   Option<tray_icon::menu::MenuId>,
+    menu_quit_id:   Option<tray_icon::menu::MenuId>,
+    hwnd:           isize,
+    tray_quit:      Arc<AtomicBool>,
 }
 
 #[derive(Clone, Default)]
@@ -130,6 +188,11 @@ impl LauncherApp {
             test_rx:        None,
             show_tool_mgr:  false,
             new_tool_form:  NewToolForm::default(),
+            tray_icon:      None,
+            menu_show_id:   None,
+            menu_quit_id:   None,
+            hwnd:           0,
+            tray_quit:      Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -233,6 +296,87 @@ impl LauncherApp {
 
 impl eframe::App for LauncherApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // ── 首帧初始化托盘图标 ─────────────────────────────────────────────
+        #[cfg(windows)]
+        if self.hwnd == 0 {
+            // 获取窗口句柄
+            let title: Vec<u16> = "CLI 启动管理器\0".encode_utf16().collect();
+            let h = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
+            if h != 0 {
+                self.hwnd = h;
+
+                // 解码 ico → RGBA
+                if let Ok(img) = image::load_from_memory(include_bytes!("../assets/app.ico")) {
+                    let rgba = img.to_rgba8();
+                    let (w, h_img) = (rgba.width(), rgba.height());
+                    if let Ok(icon) = tray_icon::Icon::from_rgba(rgba.into_raw(), w, h_img) {
+                        use tray_icon::menu::{Menu, MenuItem};
+
+                        let menu = Menu::new();
+                        let item_show = MenuItem::new("显示窗口", true, None);
+                        let item_quit = MenuItem::new("退出", true, None);
+                        let _ = menu.append(&item_show);
+                        let _ = menu.append(&item_quit);
+
+                        let show_id = item_show.id().clone();
+                        let quit_id = item_quit.id().clone();
+                        self.menu_show_id = Some(show_id.clone());
+                        self.menu_quit_id = Some(quit_id.clone());
+
+                        // 用 set_event_handler 注册回调：窗口隐藏后 update() 不再被调用，
+                        // 但 Windows 消息分发仍会触发这些回调，因此可直接调用 Win32 API。
+                        let hwnd_val = h;
+                        tray_icon::TrayIconEvent::set_event_handler(Some(move |event: tray_icon::TrayIconEvent| {
+                            if let tray_icon::TrayIconEvent::DoubleClick { .. } = event {
+                                unsafe {
+                                    ShowWindow(hwnd_val, SW_SHOW);
+                                    SetForegroundWindow(hwnd_val);
+                                }
+                            }
+                        }));
+
+                        let hwnd_val2 = h;
+                        let quit_flag = self.tray_quit.clone();
+                        tray_icon::menu::MenuEvent::set_event_handler(Some(move |event: tray_icon::menu::MenuEvent| {
+                            if event.id == show_id {
+                                unsafe {
+                                    ShowWindow(hwnd_val2, SW_SHOW);
+                                    SetForegroundWindow(hwnd_val2);
+                                }
+                            } else if event.id == quit_id {
+                                // 设标志 + 显示窗口唤醒事件循环，由 update() 正常 drop 托盘图标
+                                quit_flag.store(true, Ordering::Relaxed);
+                                unsafe { ShowWindow(hwnd_val2, SW_SHOW); }
+                            }
+                        }));
+
+                        if let Ok(tray) = tray_icon::TrayIconBuilder::new()
+                            .with_tooltip("CLI 启动管理器")
+                            .with_icon(icon)
+                            .with_menu(Box::new(menu))
+                            .build()
+                        {
+                            self.tray_icon = Some(tray);
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── 托盘"退出"：drop 托盘图标后正常关闭窗口 ──────────────────
+        #[cfg(windows)]
+        if self.tray_quit.load(Ordering::Relaxed) {
+            self.tray_icon.take(); // Drop → 移除托盘图标
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+
+        // ── 拦截关闭按钮 → 隐藏到托盘 ─────────────────────────────────────
+        #[cfg(windows)]
+        if ctx.input(|i| i.viewport().close_requested()) && self.tray_icon.is_some() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            unsafe { ShowWindow(self.hwnd, SW_HIDE); }
+        }
+
         // 轮询异步测试结果
         if let Some(rx) = &self.test_rx {
             match rx.try_recv() {

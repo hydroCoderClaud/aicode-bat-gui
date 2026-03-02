@@ -8,49 +8,43 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Tech Stack
 
-- **Frontend**: React 19 + TypeScript + Vite (port 1422) + Tailwind CSS v4
-- **Backend**: Rust via Tauri 2
-- **IPC**: Tauri `invoke()` for frontend→backend calls
+- **Language**: Pure Rust
+- **GUI**: eframe / egui 0.29
+- **HTTP**: reqwest (async, with socks proxy support)
+- **Async runtime**: tokio
+- **System tray**: tray-icon 0.19 + image (ico decoding)
+- **Windows integration**: Win32 FFI (FindWindowW, ShowWindow, CreateMutexW, etc.)
 
 ## Development Commands
 
 ```bash
-# Start dev mode (Vite + Tauri hot reload)
-npm run tauri dev
+# Check compilation
+cargo check
 
-# Build production app
-npm run tauri build
+# Build debug
+cargo build
 
-# Frontend only (no Tauri window)
-npm run dev
-
-# Type-check frontend
-npx tsc --noEmit
+# Build release (must copy to exe/ afterwards)
+cargo build --release
+cp target/release/aicode-bat-gui.exe exe/aicode-bat-gui.exe
 ```
+
+**重要**: `cargo build --release` 后必须复制到 `exe/` 目录。
 
 ## Architecture
 
-### Frontend (`src/`)
-Single-file app in `src/App.tsx`. All state lives in one React component with no routing:
-- Left sidebar: config list
-- Right panel: form for editing the selected config
-- Bottom: status bar
-
-The frontend calls Tauri commands via `invoke()` and mirrors the Rust data types via TypeScript interfaces at the top of `App.tsx`.
-
-### Backend (`src-tauri/src/`)
+### Source Files (`src/`)
 
 | File | Responsibility |
 |------|----------------|
-| `lib.rs` | Tauri app bootstrap, config path resolution, plugin registration |
-| `config.rs` | Data structures (`Tool`, `Config`, `Global`, `LauncherConfigData`) + `ConfigManager` CRUD |
-| `commands.rs` | `#[tauri::command]` handlers exposed to frontend (`get_config_data`, `save_config`, `delete_config`, `update_global`, `test_connection`, `launch`, `get_config_path`) |
-| `launcher.rs` | Windows-specific launch: writes a `.bat` to `%TEMP%`, spawns it via `cmd /c` with `CREATE_NEW_CONSOLE` flag |
-| `api_test.rs` | Async HTTP validation for Anthropic, OpenAI-compatible, Gemini, and generic APIs using `reqwest` |
+| `main.rs` | 入口、Win32 FFI、单实例检测、系统托盘、egui UI（单文件应用，所有状态在 `LauncherApp` 中） |
+| `config.rs` | 数据结构 (`Tool`, `Config`, `Global`, `LauncherConfigData`) + `ConfigManager` CRUD |
+| `launcher.rs` | Windows 启动机制：写 `.bat` 到 `%TEMP%`，通过 `cmd /c` + `CREATE_NEW_CONSOLE` 启动 |
+| `api_test.rs` | 异步 HTTP 连接测试：Anthropic、OpenAI 兼容、Gemini、通用 API |
 
 ### Config File (`launcher_config.json`)
 
-Persisted automatically. Location priority: exe directory → cwd → `%AppData%\aicode-bat-gui\`.
+Persisted automatically. Location priority: exe directory (portable) → `%AppData%\aicode-bat-gui\` (installed).
 
 Structure:
 ```json
@@ -63,7 +57,8 @@ Structure:
 
 ### Key Design Decisions
 
-- **Mutex + lock-release pattern**: `AppState` wraps `ConfigManager` in a `Mutex`. Async commands (`test_connection`, `launch`) explicitly drop the lock before calling async functions to avoid holding it across `.await` points.
-- **Launch mechanism**: Rather than exec in-process, a `.bat` file is written to `%TEMP%` with environment variable `SET` commands, then executed in a new CMD window so the user can see output and interact with the CLI.
-- **`FrontConfig` vs `Config`**: The frontend-facing structs in `commands.rs` mirror the internal `config.rs` structs 1:1 (currently identical). The separation exists for potential future divergence.
-- **Tool definitions are data-driven**: Adding support for a new CLI tool only requires adding an entry to the `tools` array in `launcher_config.json` — no code changes needed.
+- **Single instance**: 使用 Win32 命名 Mutex (`Global\aicode-bat-gui-single-instance`) 确保只运行一个实例，重复启动时激活已有窗口。
+- **System tray**: 关闭按钮隐藏窗口到托盘（`ShowWindow(SW_HIDE)`），而非退出程序。使用 `tray_icon::set_event_handler` 回调处理托盘事件（双击恢复、右键菜单退出），因为窗口隐藏后 egui 的 `update()` 不再被调用，轮询模式无法工作。
+- **Launch mechanism**: `.bat` 文件写入 `%TEMP%` 并在新 CMD 窗口执行，用户可看到输出并与 CLI 交互。
+- **Tool definitions are data-driven**: 新增 CLI 工具只需在 `tools` 数组添加条目，无需改代码。
+- **Window icon**: 窗口标题栏、任务栏、托盘图标统一使用 `assets/app.ico`。
