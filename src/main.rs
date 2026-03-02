@@ -36,7 +36,11 @@ fn main() -> eframe::Result {
         unsafe {
             let _handle = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
             if GetLastError() == ERROR_ALREADY_EXISTS {
-                // 已有实例运行，激活其窗口后退出
+                // 已有实例运行：将右键目录写入临时文件，激活窗口后退出
+                if let Some(dir) = std::env::args().nth(1).filter(|p| std::path::Path::new(p).is_dir()) {
+                    let path = std::env::temp_dir().join("aicode-bat-gui-open-dir.txt");
+                    let _ = std::fs::write(&path, &dir);
+                }
                 let title: Vec<u16> = "CLI 启动管理器\0".encode_utf16().collect();
                 let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
                 if hwnd != 0 {
@@ -296,6 +300,21 @@ impl LauncherApp {
 
 impl eframe::App for LauncherApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // ── 检查其他实例传来的右键打开目录 ───────────────────────────────
+        {
+            let path = std::env::temp_dir().join("aicode-bat-gui-open-dir.txt");
+            if let Ok(dir) = std::fs::read_to_string(&path) {
+                let _ = std::fs::remove_file(&path);
+                let dir = dir.trim().to_string();
+                if !dir.is_empty() {
+                    if let Some(form) = &mut self.form {
+                        form.directory = dir.clone();
+                    }
+                    self.config_mgr.data.global.last_directory = dir;
+                }
+            }
+        }
+
         // ── 首帧初始化托盘图标 ─────────────────────────────────────────────
         #[cfg(windows)]
         if self.hwnd == 0 {
