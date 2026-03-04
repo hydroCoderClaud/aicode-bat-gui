@@ -1,0 +1,4 @@
+LIBRARY aicode_shell_ext
+EXPORTS
+    DllGetClassObject PRIVATE
+    DllCanUnloadNow PRIVATE

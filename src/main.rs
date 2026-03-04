@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 // ── Win32 FFI：用于隐藏/显示窗口 ────────────────────────────────────────────
 #[cfg(windows)]
@@ -127,10 +127,10 @@ struct LauncherApp {
     new_tool_form:  NewToolForm,
     // 系统托盘
     tray_icon:      Option<tray_icon::TrayIcon>,
-    menu_show_id:   Option<tray_icon::menu::MenuId>,
     menu_quit_id:   Option<tray_icon::menu::MenuId>,
     hwnd:           isize,
     tray_quit:      Arc<AtomicBool>,
+    tray_switch_tab: Arc<AtomicU8>,  // 0=无, 1=AICLI启动, 2=密码助手
     // 密码助手
     keychain_mgr:       keychain::KeychainManager,
     kc_selected_id:     String,
@@ -220,10 +220,10 @@ impl LauncherApp {
             show_tool_mgr:  false,
             new_tool_form:  NewToolForm::default(),
             tray_icon:      None,
-            menu_show_id:   None,
             menu_quit_id:   None,
             hwnd:           0,
             tray_quit:      Arc::new(AtomicBool::new(false)),
+            tray_switch_tab: Arc::new(AtomicU8::new(0)),
             keychain_mgr,
             kc_selected_id:     String::new(),
             kc_search:          String::new(),
@@ -688,17 +688,20 @@ impl eframe::App for LauncherApp {
                     let rgba = img.to_rgba8();
                     let (w, h_img) = (rgba.width(), rgba.height());
                     if let Ok(icon) = tray_icon::Icon::from_rgba(rgba.into_raw(), w, h_img) {
-                        use tray_icon::menu::{Menu, MenuItem};
+                        use tray_icon::menu::{Menu, MenuItem, PredefinedMenuItem};
 
                         let menu = Menu::new();
-                        let item_show = MenuItem::new("显示窗口", true, None);
+                        let item_launch = MenuItem::new("AICLI启动", true, None);
+                        let item_keychain = MenuItem::new("密码助手", true, None);
                         let item_quit = MenuItem::new("退出", true, None);
-                        let _ = menu.append(&item_show);
+                        let _ = menu.append(&item_launch);
+                        let _ = menu.append(&item_keychain);
+                        let _ = menu.append(&PredefinedMenuItem::separator());
                         let _ = menu.append(&item_quit);
 
-                        let show_id = item_show.id().clone();
+                        let launch_id = item_launch.id().clone();
+                        let keychain_id = item_keychain.id().clone();
                         let quit_id = item_quit.id().clone();
-                        self.menu_show_id = Some(show_id.clone());
                         self.menu_quit_id = Some(quit_id.clone());
 
                         // 用 set_event_handler 注册回调：窗口隐藏后 update() 不再被调用，
@@ -715,8 +718,16 @@ impl eframe::App for LauncherApp {
 
                         let hwnd_val2 = h;
                         let quit_flag = self.tray_quit.clone();
+                        let tab_flag = self.tray_switch_tab.clone();
                         tray_icon::menu::MenuEvent::set_event_handler(Some(move |event: tray_icon::menu::MenuEvent| {
-                            if event.id == show_id {
+                            if event.id == launch_id {
+                                tab_flag.store(1, Ordering::Relaxed);
+                                unsafe {
+                                    ShowWindow(hwnd_val2, SW_SHOW);
+                                    SetForegroundWindow(hwnd_val2);
+                                }
+                            } else if event.id == keychain_id {
+                                tab_flag.store(2, Ordering::Relaxed);
                                 unsafe {
                                     ShowWindow(hwnd_val2, SW_SHOW);
                                     SetForegroundWindow(hwnd_val2);
@@ -739,6 +750,14 @@ impl eframe::App for LauncherApp {
                     }
                 }
             }
+        }
+
+        // ── 托盘菜单切换标签页 ────────────────────────────────────────────
+        #[cfg(windows)]
+        match self.tray_switch_tab.swap(0, Ordering::Relaxed) {
+            1 => self.active_tab = AppTab::ConfigManager,
+            2 => self.active_tab = AppTab::Keychain,
+            _ => {}
         }
 
         // ── 托盘"退出"：drop 托盘图标后正常关闭窗口 ──────────────────
@@ -772,32 +791,12 @@ impl eframe::App for LauncherApp {
             egui::Visuals::light()
         });
 
-        // ── 按标签页渲染主内容 ─────────────────────────────────────────────
-        match self.active_tab {
-        AppTab::ConfigManager => {
-
-        // 收集本帧 UI 动作（避免在持有可变借用时调用 &mut self 方法）
-        let mut do_save           = false;
-        let mut do_delete_click   = false;
-        let mut do_delete_confirm = false;
-        let mut do_delete_cancel  = false;
-        let mut do_test           = false;
-        let mut do_launch         = false;
-        let mut select_id: Option<String> = None;
-        let mut launch_id: Option<String> = None;
-        let mut do_new            = false;
-        let mut do_move_up        = false;
-        let mut do_move_down      = false;
-        let mut do_toggle_tool_mgr = false;
-        let mut do_delete_tool: Option<String> = None;
-        let mut do_add_tool       = false;
-
         // ── 顶栏 ──────────────────────────────────────────────────────────────
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("CLI 启动管理器");
                 ui.separator();
-                ui.selectable_value(&mut self.active_tab, AppTab::ConfigManager, "配置管理");
+                ui.selectable_value(&mut self.active_tab, AppTab::ConfigManager, "AICLI启动");
                 ui.selectable_value(&mut self.active_tab, AppTab::Keychain, "密码助手");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button(if self.dark_mode { "☀" } else { "🌙" }).clicked() {
@@ -818,6 +817,15 @@ impl eframe::App for LauncherApp {
                             Err(e) => self.status = format!("❌ 卸载失败：{}", e),
                         }
                     }
+                    if ui.button("💾 备份").on_hover_text("备份配置和密码数据到 backup 子目录").clicked() {
+                        match backup_data_files(
+                            &self.config_mgr.config_path,
+                            &self.keychain_mgr.config_path,
+                        ) {
+                            Ok(msg) => self.status = format!("✅ {}", msg),
+                            Err(e)  => self.status = format!("❌ 备份失败：{}", e),
+                        }
+                    }
                 });
             });
         });
@@ -829,6 +837,26 @@ impl eframe::App for LauncherApp {
                 ui.label(&self.status);
             });
         });
+
+        // ── 按标签页渲染主内容 ─────────────────────────────────────────────
+        match self.active_tab {
+        AppTab::ConfigManager => {
+
+        // 收集本帧 UI 动作（避免在持有可变借用时调用 &mut self 方法）
+        let mut do_save           = false;
+        let mut do_delete_click   = false;
+        let mut do_delete_confirm = false;
+        let mut do_delete_cancel  = false;
+        let mut do_test           = false;
+        let mut do_launch         = false;
+        let mut select_id: Option<String> = None;
+        let mut launch_id: Option<String> = None;
+        let mut do_new            = false;
+        let mut do_move_up        = false;
+        let mut do_move_down      = false;
+        let mut do_toggle_tool_mgr = false;
+        let mut do_delete_tool: Option<String> = None;
+        let mut do_add_tool       = false;
 
         // ── 左侧配置列表 ──────────────────────────────────────────────────────
         egui::SidePanel::left("sidebar").width_range(160.0..=280.0).show(ctx, |ui| {
@@ -1296,22 +1324,41 @@ fn register_context_menu() -> Result<(), String> {
     use winreg::RegKey;
 
     let exe = std::env::current_exe()
-        .map_err(|e| e.to_string())?
-        .to_string_lossy()
-        .to_string();
+        .map_err(|e| e.to_string())?;
+    let exe_str = exe.to_string_lossy().to_string();
+    let exe_dir = exe.parent().ok_or("无法获取 exe 目录")?;
+    let dll_path = exe_dir.join("aicode_shell_ext.dll");
+
+    if !dll_path.exists() {
+        return Err("未找到 aicode_shell_ext.dll，请确保 DLL 与 exe 在同一目录".into());
+    }
+    let dll_str = dll_path.to_string_lossy().to_string();
 
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+
+    // 清除旧的经典注册方式（command 子键），否则会覆盖 ExplorerCommandHandler
+    let _ = hkcu.delete_subkey_all(
+        r"Software\Classes\Directory\Background\shell\AICode启动器",
+    );
+
+    // 注册 shell verb，设置 ExplorerCommandHandler（Windows 11 现代右键菜单）
     let (key, _) = hkcu
         .create_subkey(r"Software\Classes\Directory\Background\shell\AICode启动器")
         .map_err(|e| e.to_string())?;
-    key.set_value("", &"AICode 启动器").map_err(|e| e.to_string())?;
-    key.set_value("Icon", &exe).map_err(|e| e.to_string())?;
+    key.set_value(
+        "ExplorerCommandHandler",
+        &"{A5C7B3F1-2E4D-4A8B-9C1F-3D7E6F8A9B2C}",
+    )
+    .map_err(|e| e.to_string())?;
+    key.set_value("Icon", &exe_str).map_err(|e| e.to_string())?;
 
-    let (cmd, _) = hkcu
-        .create_subkey(r"Software\Classes\Directory\Background\shell\AICode启动器\command")
+    // 注册 CLSID 及 InProcServer32，指向 DLL
+    let (srv, _) = hkcu
+        .create_subkey(r"Software\Classes\CLSID\{A5C7B3F1-2E4D-4A8B-9C1F-3D7E6F8A9B2C}\InProcServer32")
         .map_err(|e| e.to_string())?;
-    let cmd_val = format!("\"{}\" \"%V\"", exe);
-    cmd.set_value("", &cmd_val).map_err(|e| e.to_string())?;
+    srv.set_value("", &dll_str).map_err(|e| e.to_string())?;
+    srv.set_value("ThreadingModel", &"Apartment")
+        .map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -1322,6 +1369,75 @@ fn unregister_context_menu() -> Result<(), String> {
     use winreg::RegKey;
 
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    hkcu.delete_subkey_all(r"Software\Classes\Directory\Background\shell\AICode启动器")
-        .map_err(|e| e.to_string())
+    let _ = hkcu.delete_subkey_all(
+        r"Software\Classes\Directory\Background\shell\AICode启动器",
+    );
+    let _ = hkcu.delete_subkey_all(
+        r"Software\Classes\CLSID\{A5C7B3F1-2E4D-4A8B-9C1F-3D7E6F8A9B2C}",
+    );
+    Ok(())
+}
+
+// ── 数据备份 ────────────────────────────────────────────────────────────────
+fn backup_data_files(config_path: &str, keychain_path: &str) -> Result<String, String> {
+    use std::path::Path;
+
+    let config_src = Path::new(config_path);
+    let data_dir = config_src.parent().ok_or("无法获取数据目录")?;
+    let backup_dir = data_dir.join("backup");
+    std::fs::create_dir_all(&backup_dir).map_err(|e| e.to_string())?;
+
+    let now: std::time::SystemTime = std::time::SystemTime::now();
+    let secs = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    // 简易 UTC 时间戳转本地日期时间（东八区 +8h）
+    let secs = secs + 8 * 3600;
+    let days = secs / 86400;
+    let day_secs = secs % 86400;
+    let h = day_secs / 3600;
+    let m = (day_secs % 3600) / 60;
+    let s = day_secs % 60;
+    // 从 1970-01-01 算天数 → 年月日
+    let (y, mo, d) = days_to_ymd(days);
+    let stamp = format!("{:04}{:02}{:02}_{:02}{:02}{:02}", y, mo, d, h, m, s);
+    let mut count = 0;
+
+    for src_path in [config_path, keychain_path] {
+        let src = Path::new(src_path);
+        if !src.exists() {
+            continue;
+        }
+        let name = src.file_name().ok_or("无效文件名")?;
+        let dest = backup_dir.join(format!("{}_{}", stamp, name.to_string_lossy()));
+        std::fs::copy(src, &dest).map_err(|e| e.to_string())?;
+        count += 1;
+    }
+
+    Ok(format!("已备份 {} 个文件到 backup/", count))
+}
+
+/// 从 Unix epoch 天数计算 (年, 月, 日)
+fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
+    let mut y = 1970;
+    loop {
+        let ydays = if is_leap(y) { 366 } else { 365 };
+        if days < ydays { break; }
+        days -= ydays;
+        y += 1;
+    }
+    let mdays: [u64; 12] = if is_leap(y) {
+        [31,29,31,30,31,30,31,31,30,31,30,31]
+    } else {
+        [31,28,31,30,31,30,31,31,30,31,30,31]
+    };
+    let mut mo = 0;
+    for &md in &mdays {
+        if days < md { break; }
+        days -= md;
+        mo += 1;
+    }
+    (y, mo + 1, days + 1)
+}
+
+fn is_leap(y: u64) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }

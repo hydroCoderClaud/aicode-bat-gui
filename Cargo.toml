@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "shell-ext"]
+resolver = "2"
+
 [package]
 name = "aicode-bat-gui"
 version = "0.1.0"
