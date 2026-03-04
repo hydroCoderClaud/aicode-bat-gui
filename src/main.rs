@@ -2,10 +2,12 @@
 
 mod api_test;
 mod config;
+mod keychain;
 mod launcher;
 
 use eframe::egui;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -106,7 +108,14 @@ fn load_cjk_font(ctx: &egui::Context) {
 
 // ── 应用状态 ──────────────────────────────────────────────────────────────────
 
+#[derive(Clone, Copy, PartialEq)]
+enum AppTab {
+    ConfigManager,
+    Keychain,
+}
+
 struct LauncherApp {
+    active_tab:     AppTab,
     config_mgr:     config::ConfigManager,
     selected_id:    String,
     form:           Option<EditForm>,
@@ -122,6 +131,14 @@ struct LauncherApp {
     menu_quit_id:   Option<tray_icon::menu::MenuId>,
     hwnd:           isize,
     tray_quit:      Arc<AtomicBool>,
+    // 密码助手
+    keychain_mgr:       keychain::KeychainManager,
+    kc_selected_id:     String,
+    kc_search:          String,
+    kc_edit_form:       Option<KcEditForm>,
+    kc_filter_tag:      String,
+    kc_visible_fields:  HashSet<usize>,
+    kc_pending_delete:  bool,
 }
 
 #[derive(Clone, Default)]
@@ -150,11 +167,20 @@ struct EditForm {
     directory:      String,
 }
 
+#[derive(Clone, Default)]
+struct KcEditForm {
+    id:        String,
+    name:      String,
+    tags_text: String,                  // 逗号分隔的标签文本
+    fields:    Vec<(String, String)>,   // 有序键值对
+}
+
 // ── 初始化 ────────────────────────────────────────────────────────────────────
 
 impl LauncherApp {
     fn new() -> Self {
         let config_mgr = config::ConfigManager::new(resolve_config_path());
+        let keychain_mgr = keychain::KeychainManager::new(resolve_keychain_path());
 
         // 优先级：命令行参数(%V，右键菜单) > cwd(任何合法目录) > 配置记录的上次目录
         // 注：右键 exe 直接打开时 Explorer 会把 CWD 设为 exe 所在目录，这是合法的工作目录；
@@ -183,6 +209,7 @@ impl LauncherApp {
             .unwrap_or_default();
 
         Self {
+            active_tab:     AppTab::ConfigManager,
             config_mgr,
             selected_id,
             form,
@@ -197,6 +224,13 @@ impl LauncherApp {
             menu_quit_id:   None,
             hwnd:           0,
             tray_quit:      Arc::new(AtomicBool::new(false)),
+            keychain_mgr,
+            kc_selected_id:     String::new(),
+            kc_search:          String::new(),
+            kc_edit_form:       None,
+            kc_filter_tag:      String::new(),
+            kc_visible_fields:  HashSet::new(),
+            kc_pending_delete:  false,
         }
     }
 }
@@ -293,6 +327,331 @@ impl LauncherApp {
             Ok(msg) => msg,
             Err(e)  => format!("启动失败：{}", e),
         };
+    }
+
+    // ── 密码助手 UI ──────────────────────────────────────────────────────────
+
+    fn ui_keychain(&mut self, ctx: &egui::Context) {
+        // 首次进入或无选中时，自动选中第一条记录
+        if self.kc_edit_form.is_none() && !self.keychain_mgr.data.entries.is_empty() {
+            let first = &self.keychain_mgr.data.entries[0];
+            self.kc_selected_id = first.id.clone();
+            self.kc_edit_form = Some(KcEditForm {
+                id: first.id.clone(),
+                name: first.name.clone(),
+                tags_text: first.tags.join(", "),
+                fields: first.fields.clone(),
+            });
+        }
+
+        let mut do_new = false;
+        let mut do_save = false;
+        let mut do_delete_click = false;
+        let mut do_delete_confirm = false;
+        let mut do_delete_cancel = false;
+        let mut select_id: Option<String> = None;
+        let mut do_add_field = false;
+        let mut do_remove_field: Option<usize> = None;
+        let mut do_move_field_up: Option<usize> = None;
+        let mut do_move_field_down: Option<usize> = None;
+
+        // ── 左侧搜索 + 列表 ─────────────────────────────────────────────
+        egui::SidePanel::left("kc_sidebar").width_range(160.0..=280.0).show(ctx, |ui| {
+            ui.add_space(4.0);
+
+            // 新增按钮置顶
+            if ui.button("➕ 新增记录").clicked() {
+                do_new = true;
+            }
+
+            ui.add_space(4.0);
+
+            // 搜索框
+            ui.horizontal(|ui| {
+                ui.label("🔍");
+                ui.add(egui::TextEdit::singleline(&mut self.kc_search)
+                    .hint_text("搜索...")
+                    .desired_width(ui.available_width()));
+            });
+
+            ui.add_space(4.0);
+
+            // 标签筛选按钮
+            let all_tags = self.keychain_mgr.all_tags();
+            if !all_tags.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    if ui.selectable_label(self.kc_filter_tag.is_empty(), "全部").clicked() {
+                        self.kc_filter_tag.clear();
+                    }
+                    for tag in &all_tags {
+                        if ui.selectable_label(self.kc_filter_tag == *tag, tag).clicked() {
+                            if self.kc_filter_tag == *tag {
+                                self.kc_filter_tag.clear();
+                            } else {
+                                self.kc_filter_tag = tag.clone();
+                            }
+                        }
+                    }
+                });
+                ui.add_space(2.0);
+            }
+
+            ui.separator();
+
+            // 过滤后的列表（可滚动）
+            let filtered: Vec<_> = self.keychain_mgr.search(&self.kc_search, &self.kc_filter_tag)
+                .into_iter().map(|e| (e.id.clone(), e.name.clone())).collect();
+
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for (id, name) in &filtered {
+                    let selected = self.kc_selected_id == *id;
+                    if ui.selectable_label(selected, name).clicked() {
+                        select_id = Some(id.clone());
+                    }
+                }
+            });
+        });
+
+        // ── 右侧详情（始终可编辑）──────────────────────────────────────
+        egui::CentralPanel::default().show(ctx, |ui| {
+            if let Some(form) = &mut self.kc_edit_form {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    // 名称 + 标签
+                    egui::Grid::new("kc_edit_form")
+                        .num_columns(2)
+                        .spacing([8.0, 6.0])
+                        .min_col_width(60.0)
+                        .show(ui, |ui| {
+                            ui.label("名称:");
+                            ui.add(egui::TextEdit::singleline(&mut form.name)
+                                .desired_width(ui.available_width()));
+                            ui.end_row();
+
+                            ui.label("标签:");
+                            ui.add(egui::TextEdit::singleline(&mut form.tags_text)
+                                .hint_text("逗号分隔，如: 云服务, 工作")
+                                .desired_width(ui.available_width()));
+                            ui.end_row();
+                        });
+
+                    ui.separator();
+                    ui.add_space(2.0);
+
+                    // 字段：key 和 value 均为可编辑输入框
+                    let field_count = form.fields.len();
+                    for i in 0..field_count {
+                        ui.horizontal(|ui| {
+                            // 字段名（固定宽度）
+                            ui.add(egui::TextEdit::singleline(&mut form.fields[i].0)
+                                .hint_text("字段名")
+                                .desired_width(160.0));
+
+                            let secret = is_secret_field(&form.fields[i].0);
+                            let visible = self.kc_visible_fields.contains(&i);
+
+                            // 按钮靠右，值输入框填满剩余空间
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button("删除").clicked() {
+                                    do_remove_field = Some(i);
+                                }
+                                if i + 1 < field_count {
+                                    if ui.small_button("▼").clicked() {
+                                        do_move_field_down = Some(i);
+                                    }
+                                } else {
+                                    ui.add_enabled(false, egui::Button::new("▼").small());
+                                }
+                                if i > 0 {
+                                    if ui.small_button("▲").clicked() {
+                                        do_move_field_up = Some(i);
+                                    }
+                                } else {
+                                    ui.add_enabled(false, egui::Button::new("▲").small());
+                                }
+                                if ui.small_button("复制").clicked() {
+                                    ui.output_mut(|o| o.copied_text = form.fields[i].1.clone());
+                                    self.status = format!("已复制「{}」", form.fields[i].0);
+                                }
+                                if secret {
+                                    let eye = if visible { "🙈" } else { "👁" };
+                                    if ui.small_button(eye).clicked() {
+                                        if visible {
+                                            self.kc_visible_fields.remove(&i);
+                                        } else {
+                                            self.kc_visible_fields.insert(i);
+                                        }
+                                    }
+                                }
+                                if secret && !visible {
+                                    ui.add(egui::TextEdit::singleline(&mut form.fields[i].1)
+                                        .hint_text("值")
+                                        .password(true)
+                                        .desired_width(ui.available_width()));
+                                } else {
+                                    ui.add(egui::TextEdit::multiline(&mut form.fields[i].1)
+                                        .hint_text("值")
+                                        .desired_rows(1)
+                                        .desired_width(ui.available_width()));
+                                }
+                            });
+                        });
+                    }
+
+                    ui.add_space(4.0);
+                    if ui.button("➕ 新增字段").clicked() {
+                        do_add_field = true;
+                    }
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("💾 保存").clicked() { do_save = true; }
+
+                        if !form.id.is_empty() {
+                            if self.kc_pending_delete {
+                                if ui.button("⚠ 确认删除").clicked() { do_delete_confirm = true; }
+                                if ui.button("取消").clicked() { do_delete_cancel = true; }
+                            } else {
+                                if ui.button("🗑 删除").clicked() { do_delete_click = true; }
+                            }
+                        }
+                    });
+                });
+            } else {
+                // 无选中
+                ui.vertical_centered(|ui| {
+                    ui.add_space(ui.available_height() / 3.0);
+                    ui.label("从左侧选择记录，或点击 [➕ 新增记录]");
+                });
+            }
+        });
+
+        // ── 处理动作 ────────────────────────────────────────────────────
+        if let Some(id) = select_id {
+            // 选中已有记录 → 自动填充表单
+            if let Some(entry) = self.keychain_mgr.find_entry(&id).cloned() {
+                self.kc_selected_id = id;
+                self.kc_pending_delete = false;
+                self.kc_visible_fields.clear();
+                self.kc_edit_form = Some(KcEditForm {
+                    id: entry.id,
+                    name: entry.name,
+                    tags_text: entry.tags.join(", "),
+                    fields: entry.fields,
+                });
+            }
+        }
+
+        if do_new {
+            self.kc_selected_id.clear();
+            self.kc_pending_delete = false;
+            self.kc_visible_fields.clear();
+            self.kc_edit_form = Some(KcEditForm {
+                fields: vec![
+                    ("网址".into(), String::new()),
+                    ("用户名".into(), String::new()),
+                    ("密码".into(), String::new()),
+                ],
+                ..Default::default()
+            });
+            self.status = "新建密码记录".into();
+        }
+
+        if do_add_field {
+            if let Some(form) = &mut self.kc_edit_form {
+                form.fields.push((String::new(), String::new()));
+            }
+        }
+
+        if let Some(idx) = do_remove_field {
+            if let Some(form) = &mut self.kc_edit_form {
+                if idx < form.fields.len() {
+                    form.fields.remove(idx);
+                }
+            }
+        }
+
+        if let Some(idx) = do_move_field_up {
+            if let Some(form) = &mut self.kc_edit_form {
+                if idx > 0 && idx < form.fields.len() {
+                    form.fields.swap(idx, idx - 1);
+                }
+            }
+        }
+
+        if let Some(idx) = do_move_field_down {
+            if let Some(form) = &mut self.kc_edit_form {
+                if idx + 1 < form.fields.len() {
+                    form.fields.swap(idx, idx + 1);
+                }
+            }
+        }
+
+        if do_save {
+            if let Some(form) = self.kc_edit_form.take() {
+                if form.name.trim().is_empty() {
+                    self.status = "错误：名称不能为空".into();
+                    self.kc_edit_form = Some(form);
+                } else {
+                    let tags: Vec<String> = form.tags_text
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    let entry = keychain::KeychainEntry {
+                        id: form.id.clone(),
+                        name: form.name.trim().to_string(),
+                        tags,
+                        fields: form.fields.into_iter()
+                            .filter(|(k, _)| !k.trim().is_empty())
+                            .collect(),
+                    };
+                    let name = entry.name.clone();
+                    if entry.id.is_empty() {
+                        // 新增
+                        self.keychain_mgr.add_entry(entry);
+                        if let Some(last) = self.keychain_mgr.data.entries.last() {
+                            self.kc_selected_id = last.id.clone();
+                            // 保存后重新填充表单以获得 id
+                            self.kc_edit_form = Some(KcEditForm {
+                                id: last.id.clone(),
+                                name: last.name.clone(),
+                                tags_text: last.tags.join(", "),
+                                fields: last.fields.clone(),
+                            });
+                        }
+                        self.status = format!("已新增：{}", name);
+                    } else {
+                        let id = entry.id.clone();
+                        self.keychain_mgr.update_entry(&id, entry);
+                        // 保存后刷新表单
+                        if let Some(saved) = self.keychain_mgr.find_entry(&id).cloned() {
+                            self.kc_edit_form = Some(KcEditForm {
+                                id: saved.id,
+                                name: saved.name,
+                                tags_text: saved.tags.join(", "),
+                                fields: saved.fields,
+                            });
+                        }
+                        self.status = format!("已更新：{}", name);
+                    }
+                    self.kc_visible_fields.clear();
+                }
+            }
+        }
+
+        if do_delete_click { self.kc_pending_delete = true; }
+        if do_delete_cancel { self.kc_pending_delete = false; }
+        if do_delete_confirm {
+            let name = self.keychain_mgr.find_entry(&self.kc_selected_id)
+                .map(|e| e.name.clone()).unwrap_or_default();
+            self.keychain_mgr.delete_entry(&self.kc_selected_id);
+            self.kc_selected_id.clear();
+            self.kc_pending_delete = false;
+            self.kc_edit_form = None;
+            self.kc_visible_fields.clear();
+            self.status = format!("已删除：{}", name);
+        }
     }
 }
 
@@ -413,6 +772,10 @@ impl eframe::App for LauncherApp {
             egui::Visuals::light()
         });
 
+        // ── 按标签页渲染主内容 ─────────────────────────────────────────────
+        match self.active_tab {
+        AppTab::ConfigManager => {
+
         // 收集本帧 UI 动作（避免在持有可变借用时调用 &mut self 方法）
         let mut do_save           = false;
         let mut do_delete_click   = false;
@@ -433,6 +796,9 @@ impl eframe::App for LauncherApp {
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("CLI 启动管理器");
+                ui.separator();
+                ui.selectable_value(&mut self.active_tab, AppTab::ConfigManager, "配置管理");
+                ui.selectable_value(&mut self.active_tab, AppTab::Keychain, "密码助手");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button(if self.dark_mode { "☀" } else { "🌙" }).clicked() {
                         self.dark_mode = !self.dark_mode;
@@ -763,6 +1129,12 @@ impl eframe::App for LauncherApp {
                 self.status = "名称和命令不能为空".into();
             }
         }
+
+        } // ConfigManager
+        AppTab::Keychain => {
+            self.ui_keychain(ctx);
+        }
+        } // match active_tab
     }
 }
 
@@ -888,6 +1260,33 @@ fn resolve_config_path() -> String {
         .unwrap_or_else(|| exe_dir.clone());
     let _ = std::fs::create_dir_all(&app_dir);
     app_dir.join("launcher_config.json").to_string_lossy().into_owned()
+}
+
+fn resolve_keychain_path() -> String {
+    // 与 resolve_config_path 相同逻辑，只是文件名不同
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| ".".into());
+
+    // 便携模式：与 launcher_config.json 同目录
+    let local_cfg = exe_dir.join("launcher_config.json");
+    if local_cfg.exists() {
+        return exe_dir.join("keychain.json").to_string_lossy().into_owned();
+    }
+
+    let app_dir = dirs::config_dir()
+        .map(|p| p.join("aicode-bat-gui"))
+        .unwrap_or_else(|| exe_dir.clone());
+    let _ = std::fs::create_dir_all(&app_dir);
+    app_dir.join("keychain.json").to_string_lossy().into_owned()
+}
+
+/// 判断字段是否为敏感字段（密码、密钥等），用于默认遮盖显示
+fn is_secret_field(key: &str) -> bool {
+    let k = key.to_lowercase();
+    k.contains("密码") || k.contains("password") || k.contains("secret")
+        || k.contains("token") || k.contains("key")
 }
 
 // ── 右键菜单注册 ──────────────────────────────────────────────────────────────
