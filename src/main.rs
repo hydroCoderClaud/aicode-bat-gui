@@ -926,9 +926,14 @@ impl eframe::App for LauncherApp {
                                 });
 
                                 form_row(ui, "API 地址:", |ui| {
-                                    ui.add(egui::TextEdit::singleline(&mut form.base_url)
-                                        .hint_text("https://...")
-                                        .desired_width(f32::INFINITY));
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.small_button("📋").on_hover_text("复制").clicked() {
+                                            ui.output_mut(|o| o.copied_text = form.base_url.clone());
+                                        }
+                                        ui.add(egui::TextEdit::singleline(&mut form.base_url)
+                                            .hint_text("https://...")
+                                            .desired_width(ui.available_width()));
+                                    });
                                 });
 
                                 form_row(ui, "密钥类型:", |ui| {
@@ -941,6 +946,9 @@ impl eframe::App for LauncherApp {
                                         let eye = if form.key_visible { "🙈" } else { "👁" };
                                         if ui.small_button(eye).clicked() {
                                             form.key_visible = !form.key_visible;
+                                        }
+                                        if ui.small_button("📋").on_hover_text("复制").clicked() {
+                                            ui.output_mut(|o| o.copied_text = form.key.clone());
                                         }
                                         ui.add(
                                             egui::TextEdit::singleline(&mut form.key)
@@ -1324,41 +1332,32 @@ fn register_context_menu() -> Result<(), String> {
     use winreg::RegKey;
 
     let exe = std::env::current_exe()
-        .map_err(|e| e.to_string())?;
-    let exe_str = exe.to_string_lossy().to_string();
-    let exe_dir = exe.parent().ok_or("无法获取 exe 目录")?;
-    let dll_path = exe_dir.join("aicode_shell_ext.dll");
-
-    if !dll_path.exists() {
-        return Err("未找到 aicode_shell_ext.dll，请确保 DLL 与 exe 在同一目录".into());
-    }
-    let dll_str = dll_path.to_string_lossy().to_string();
+        .map_err(|e| e.to_string())?
+        .to_string_lossy()
+        .to_string();
 
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
 
-    // 清除旧的经典注册方式（command 子键），否则会覆盖 ExplorerCommandHandler
+    // 清除旧的 COM DLL 注册（ExplorerCommandHandler + CLSID），改回经典 command 方式
     let _ = hkcu.delete_subkey_all(
         r"Software\Classes\Directory\Background\shell\AICode启动器",
     );
+    let _ = hkcu.delete_subkey_all(
+        r"Software\Classes\CLSID\{A5C7B3F1-2E4D-4A8B-9C1F-3D7E6F8A9B2C}",
+    );
 
-    // 注册 shell verb，设置 ExplorerCommandHandler（Windows 11 现代右键菜单）
+    // 注册经典 shell verb + command（%V = 当前目录）
     let (key, _) = hkcu
         .create_subkey(r"Software\Classes\Directory\Background\shell\AICode启动器")
         .map_err(|e| e.to_string())?;
-    key.set_value(
-        "ExplorerCommandHandler",
-        &"{A5C7B3F1-2E4D-4A8B-9C1F-3D7E6F8A9B2C}",
-    )
-    .map_err(|e| e.to_string())?;
-    key.set_value("Icon", &exe_str).map_err(|e| e.to_string())?;
+    key.set_value("", &"AICode 启动器").map_err(|e| e.to_string())?;
+    key.set_value("Icon", &exe).map_err(|e| e.to_string())?;
 
-    // 注册 CLSID 及 InProcServer32，指向 DLL
-    let (srv, _) = hkcu
-        .create_subkey(r"Software\Classes\CLSID\{A5C7B3F1-2E4D-4A8B-9C1F-3D7E6F8A9B2C}\InProcServer32")
+    let (cmd, _) = hkcu
+        .create_subkey(r"Software\Classes\Directory\Background\shell\AICode启动器\command")
         .map_err(|e| e.to_string())?;
-    srv.set_value("", &dll_str).map_err(|e| e.to_string())?;
-    srv.set_value("ThreadingModel", &"Apartment")
-        .map_err(|e| e.to_string())?;
+    let cmd_val = format!("\"{}\" \"%V\"", exe);
+    cmd.set_value("", &cmd_val).map_err(|e| e.to_string())?;
 
     Ok(())
 }
