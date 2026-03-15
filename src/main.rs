@@ -826,6 +826,12 @@ impl eframe::App for LauncherApp {
                             Err(e)  => self.status = format!("❌ 备份失败：{}", e),
                         }
                     }
+                    if ui.button("📁 打开备份目录").on_hover_text("打开备份文件所在目录").clicked() {
+                        match open_backup_directory(&self.config_mgr.config_path) {
+                            Ok(_) => self.status = "✅ 已打开备份目录".into(),
+                            Err(e) => self.status = format!("❌ 打开失败：{}", e),
+                        }
+                    }
                 });
             });
         });
@@ -1412,6 +1418,38 @@ fn backup_data_files(config_path: &str, keychain_path: &str) -> Result<String, S
     }
 
     Ok(format!("已备份 {} 个文件到 backup/", count))
+}
+
+/// 打开备份目录
+fn open_backup_directory(config_path: &str) -> Result<(), String> {
+    use std::path::Path;
+    use std::process::Command;
+
+    let config_src = Path::new(config_path);
+    let data_dir = config_src.parent().ok_or("无法获取数据目录")?;
+    let backup_dir = data_dir.join("backup");
+
+    if !backup_dir.exists() {
+        return Err("备份目录不存在".to_string());
+    }
+
+    let backup_path = backup_dir.to_string_lossy().to_string();
+    #[cfg(windows)]
+    {
+        Command::new("explorer")
+            .arg(&backup_path)
+            .spawn()
+            .map_err(|e| format!("打开目录失败：{}", e))?;
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new("xdg-open")
+            .arg(&backup_path)
+            .spawn()
+            .map_err(|e| format!("打开目录失败：{}", e))?;
+    }
+
+    Ok(())
 }
 
 /// 从 Unix epoch 天数计算 (年, 月, 日)

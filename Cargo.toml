@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "shell-ext"]
+members = ["."]
 resolver = "2"
 
 [package]
