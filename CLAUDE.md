@@ -62,3 +62,4 @@ Structure:
 - **Launch mechanism**: `.bat` 文件写入 `%TEMP%` 并在新 CMD 窗口执行，用户可看到输出并与 CLI 交互。
 - **Tool definitions are data-driven**: 新增 CLI 工具只需在 `tools` 数组添加条目，无需改代码。
 - **Window icon**: 窗口标题栏、任务栏、托盘图标统一使用 `assets/app.ico`。
+- **Right-click menu**: 使用 Windows 注册表的经典 shell verb 方式实现，无需 COM DLL。
