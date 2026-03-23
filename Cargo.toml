@@ -7,6 +7,8 @@ name = "aicode-bat-gui"
 version = "0.1.0"
 description = "AI Code CLI Launcher"
 edition = "2021"
+license = "MIT"
+repository = "https://github.com/hydroCoderClaud/aicode-bat-gui"
 
 [[bin]]
 name = "aicode-bat-gui"
