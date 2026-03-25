@@ -875,7 +875,7 @@ impl eframe::App for LauncherApp {
         let mut do_add_tool       = false;
 
         // ── 左侧配置列表 ──────────────────────────────────────────────────────
-        egui::SidePanel::left("sidebar").width_range(160.0..=280.0).show(ctx, |ui| {
+        egui::SidePanel::left("sidebar").width_range(200.0..=350.0).show(ctx, |ui| {
             ui.add_space(4.0);
             if ui.button("➕ 新增配置").clicked() {
                 do_new = true;
@@ -1099,6 +1099,26 @@ impl eframe::App for LauncherApp {
                             ui.add_enabled_ui(!testing, |ui| {
                                 if ui.button("🔍 测试连接").clicked() { do_test = true; }
                             });
+
+                            if ui.button("⬆").on_hover_text("上移").clicked() { do_move_up = true; }
+                            if ui.button("⬇").on_hover_text("下移").clicked() { do_move_down = true; }
+
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button("  ▶ 启 动  ").clicked() { do_launch = true; }
+                            });
+                        });
+
+                        // 全局设置分隔线
+                        ui.add_space(4.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+
+                        // 全局设置区域
+                        ui.label(egui::RichText::new("全局设置").strong());
+                        ui.add_space(4.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label("测试模型:");
                             let resp = ui.add(
                                 egui::TextEdit::singleline(&mut self.config_mgr.data.global.test_model)
                                     .hint_text("claude-haiku-4-5")
@@ -1110,52 +1130,51 @@ impl eframe::App for LauncherApp {
                                 }
                                 let _ = self.config_mgr.save();
                             }
+
+                            ui.label("超时:");
                             let to_resp = ui.add(
                                 egui::DragValue::new(&mut self.config_mgr.data.global.test_timeout_secs)
                                     .range(1..=300)
                                     .suffix("s"),
                             ).on_hover_text("测试连接超时（秒），全局设置");
                             if to_resp.changed() { let _ = self.config_mgr.save(); }
+                        });
 
-                            // 额外备份目录配置
-                            ui.horizontal(|ui| {
-                                ui.label("额外备份目录:");
-                                let resp = ui.add(
-                                    egui::TextEdit::singleline(&mut self.config_mgr.data.global.backup_directory)
-                                        .hint_text("可选，留空则只备份到程序目录下的 backup/")
-                                        .desired_width(200.0),
-                                ).on_hover_text("额外备份目录，配置后会同时备份到两个位置");
-                                if resp.changed() {
+                        ui.add_space(4.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+
+                        // 备份目录配置
+                        ui.label(egui::RichText::new("备份设置").strong());
+                        ui.add_space(4.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label("额外备份目录:");
+                            let resp = ui.add(
+                                egui::TextEdit::singleline(&mut self.config_mgr.data.global.backup_directory)
+                                    .hint_text("可选，留空则只备份到程序目录下的 backup/")
+                                    .desired_width(250.0),
+                            ).on_hover_text("额外备份目录，配置后会同时备份到两个位置");
+                            if resp.changed() {
+                                let _ = self.config_mgr.save();
+                            }
+                            if ui.button("📁 浏览").clicked() {
+                                let current_dir = {
+                                    let backup_dir = &self.config_mgr.data.global.backup_directory;
+                                    if backup_dir.is_empty() {
+                                        std::env::current_dir().unwrap_or_default()
+                                    } else {
+                                        std::path::PathBuf::from(backup_dir.clone())
+                                    }
+                                };
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .set_directory(&current_dir)
+                                    .pick_folder()
+                                {
+                                    self.config_mgr.data.global.backup_directory = path.to_string_lossy().to_string();
                                     let _ = self.config_mgr.save();
                                 }
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label("");
-                                if ui.button("📁 浏览").clicked() {
-                                    let current_dir = {
-                                        let backup_dir = &self.config_mgr.data.global.backup_directory;
-                                        if backup_dir.is_empty() {
-                                            std::env::current_dir().unwrap_or_default()
-                                        } else {
-                                            std::path::PathBuf::from(backup_dir.clone())
-                                        }
-                                    };
-                                    if let Some(path) = rfd::FileDialog::new()
-                                        .set_directory(&current_dir)
-                                        .pick_folder()
-                                    {
-                                        self.config_mgr.data.global.backup_directory = path.to_string_lossy().to_string();
-                                        let _ = self.config_mgr.save();
-                                    }
-                                }
-                            });
-
-                            if ui.button("⬆").on_hover_text("上移").clicked() { do_move_up = true; }
-                            if ui.button("⬇").on_hover_text("下移").clicked() { do_move_down = true; }
-
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.button("  ▶ 启 动  ").clicked() { do_launch = true; }
-                            });
+                            }
                         });
                     });
                 }
