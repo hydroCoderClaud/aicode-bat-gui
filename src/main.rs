@@ -125,6 +125,7 @@ struct LauncherApp {
     test_rx:        Option<mpsc::Receiver<Result<String, String>>>,
     show_tool_mgr:  bool,
     new_tool_form:  NewToolForm,
+    config_search:  String,  // 配置列表搜索框
     // 系统托盘
     tray_icon:      Option<tray_icon::TrayIcon>,
     menu_quit_id:   Option<tray_icon::menu::MenuId>,
@@ -219,6 +220,7 @@ impl LauncherApp {
             test_rx:        None,
             show_tool_mgr:  false,
             new_tool_form:  NewToolForm::default(),
+            config_search:  String::new(),
             tray_icon:      None,
             menu_quit_id:   None,
             hwnd:           0,
@@ -244,14 +246,17 @@ impl LauncherApp {
             self.status = "错误：名称不能为空".into();
             return;
         }
-        let cfg  = form_to_cfg(&form);
+        let cfg = form_to_cfg(&form);
         let name = cfg.name.clone();
         if self.config_mgr.find_config(&cfg.id).is_some() {
             self.config_mgr.update_config(&cfg.id.clone(), cfg.clone());
             self.status = format!("已更新：{}", name);
         } else {
             self.config_mgr.add_config(cfg.clone());
-            self.selected_id = cfg.id.clone();
+            // add_config 会为空 id 生成新值，但传入的 cfg 不会被修改，需要从已保存的数据中获取
+            self.selected_id = self.config_mgr.data.configs.last()
+                .map(|c| c.id.clone())
+                .unwrap_or_default();
             self.status = format!("已新增：{}", name);
         }
         // 用保存后的数据刷新表单（含新生成的 id）
@@ -817,18 +822,23 @@ impl eframe::App for LauncherApp {
                             Err(e) => self.status = format!("❌ 卸载失败：{}", e),
                         }
                     }
-                    if ui.button("💾 备份").on_hover_text("备份配置和密码数据到 backup 子目录").clicked() {
+                    if ui.button("💾 备份").on_hover_text("备份配置和密码数据到 backup 子目录和额外备份目录").clicked() {
+                        let extra_backup = self.config_mgr.data.global.backup_directory.as_str();
+                        let extra_backup_opt = if extra_backup.is_empty() { None } else { Some(extra_backup) };
                         match backup_data_files(
                             &self.config_mgr.config_path,
                             &self.keychain_mgr.config_path,
+                            extra_backup_opt,
                         ) {
                             Ok(msg) => self.status = format!("✅ {}", msg),
                             Err(e)  => self.status = format!("❌ 备份失败：{}", e),
                         }
                     }
                     if ui.button("📁 打开备份目录").on_hover_text("打开备份文件所在目录").clicked() {
-                        match open_backup_directory(&self.config_mgr.config_path) {
-                            Ok(_) => self.status = "✅ 已打开备份目录".into(),
+                        let extra_backup = self.config_mgr.data.global.backup_directory.as_str();
+                        let extra_backup_opt = if extra_backup.is_empty() { None } else { Some(extra_backup) };
+                        match open_backup_directory(&self.config_mgr.config_path, extra_backup_opt) {
+                            Ok(msg) => self.status = format!("✅ {}", msg),
                             Err(e) => self.status = format!("❌ 打开失败：{}", e),
                         }
                     }
@@ -870,12 +880,46 @@ impl eframe::App for LauncherApp {
             if ui.button("➕ 新增配置").clicked() {
                 do_new = true;
             }
+
+            // 搜索框
+            ui.add_space(4.0);
+            let search_resp = ui.add(
+                egui::TextEdit::singleline(&mut self.config_search)
+                    .hint_text("🔍 搜索配置...")
+                    .desired_width(f32::INFINITY)
+            );
+            if search_resp.changed() {
+                // 搜索内容变化时，如果当前选中的配置不在可见列表中，清空选择
+                if !self.config_search.is_empty() {
+                    if let Some(form) = &self.form {
+                        let matched = self.config_mgr.data.configs.iter()
+                            .any(|c| c.id == form.id &&
+                                (c.name.to_lowercase().contains(&self.config_search.to_lowercase()) ||
+                                 c.description.to_lowercase().contains(&self.config_search.to_lowercase())));
+                        if !matched && !form.id.is_empty() {
+                            self.selected_id = String::new();
+                        }
+                    }
+                }
+            }
+
             ui.separator();
 
             let configs = self.config_mgr.data.configs.clone();
             let sel     = &self.selected_id;
+            let search_lower = self.config_search.to_lowercase();
+
             egui::ScrollArea::vertical().show(ui, |ui| {
                 for cfg in &configs {
+                    // 过滤：搜索框为空或匹配名称/描述
+                    if !search_lower.is_empty() {
+                        let name_match = cfg.name.to_lowercase().contains(&search_lower);
+                        let desc_match = cfg.description.to_lowercase().contains(&search_lower);
+                        if !name_match && !desc_match {
+                            continue;
+                        }
+                    }
+
                     let resp = ui.selectable_label(*sel == cfg.id, &cfg.name);
                     if resp.clicked()        { select_id = Some(cfg.id.clone()); }
                     if resp.double_clicked() { launch_id = Some(cfg.id.clone()); }
@@ -1072,6 +1116,39 @@ impl eframe::App for LauncherApp {
                                     .suffix("s"),
                             ).on_hover_text("测试连接超时（秒），全局设置");
                             if to_resp.changed() { let _ = self.config_mgr.save(); }
+
+                            // 额外备份目录配置
+                            ui.horizontal(|ui| {
+                                ui.label("额外备份目录:");
+                                let resp = ui.add(
+                                    egui::TextEdit::singleline(&mut self.config_mgr.data.global.backup_directory)
+                                        .hint_text("可选，留空则只备份到程序目录下的 backup/")
+                                        .desired_width(200.0),
+                                ).on_hover_text("额外备份目录，配置后会同时备份到两个位置");
+                                if resp.changed() {
+                                    let _ = self.config_mgr.save();
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("");
+                                if ui.button("📁 浏览").clicked() {
+                                    let current_dir = {
+                                        let backup_dir = &self.config_mgr.data.global.backup_directory;
+                                        if backup_dir.is_empty() {
+                                            std::env::current_dir().unwrap_or_default()
+                                        } else {
+                                            std::path::PathBuf::from(backup_dir.clone())
+                                        }
+                                    };
+                                    if let Some(path) = rfd::FileDialog::new()
+                                        .set_directory(&current_dir)
+                                        .pick_folder()
+                                    {
+                                        self.config_mgr.data.global.backup_directory = path.to_string_lossy().to_string();
+                                        let _ = self.config_mgr.save();
+                                    }
+                                }
+                            });
 
                             if ui.button("⬆").on_hover_text("上移").clicked() { do_move_up = true; }
                             if ui.button("⬇").on_hover_text("下移").clicked() { do_move_down = true; }
@@ -1384,13 +1461,10 @@ fn unregister_context_menu() -> Result<(), String> {
 }
 
 // ── 数据备份 ────────────────────────────────────────────────────────────────
-fn backup_data_files(config_path: &str, keychain_path: &str) -> Result<String, String> {
+/// 备份到指定目录
+fn backup_to_directory(backup_dir: &std::path::Path, config_path: &str, keychain_path: &str) -> Result<usize, String> {
     use std::path::Path;
-
-    let config_src = Path::new(config_path);
-    let data_dir = config_src.parent().ok_or("无法获取数据目录")?;
-    let backup_dir = data_dir.join("backup");
-    std::fs::create_dir_all(&backup_dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(backup_dir).map_err(|e| e.to_string())?;
 
     let now: std::time::SystemTime = std::time::SystemTime::now();
     let secs = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
@@ -1417,39 +1491,95 @@ fn backup_data_files(config_path: &str, keychain_path: &str) -> Result<String, S
         count += 1;
     }
 
-    Ok(format!("已备份 {} 个文件到 backup/", count))
+    Ok(count)
 }
 
-/// 打开备份目录
-fn open_backup_directory(config_path: &str) -> Result<(), String> {
+fn backup_data_files(config_path: &str, keychain_path: &str, extra_backup_dir: Option<&str>) -> Result<String, String> {
     use std::path::Path;
-    use std::process::Command;
 
     let config_src = Path::new(config_path);
     let data_dir = config_src.parent().ok_or("无法获取数据目录")?;
     let backup_dir = data_dir.join("backup");
 
-    if !backup_dir.exists() {
+    // 备份到默认位置
+    let count1 = backup_to_directory(&backup_dir, config_path, keychain_path)?;
+
+    // 备份到额外位置（如果配置了）
+    let count2 = if let Some(extra_dir) = extra_backup_dir.filter(|s| !s.is_empty()) {
+        match backup_to_directory(Path::new(extra_dir), config_path, keychain_path) {
+            Ok(c) => c,
+            Err(e) => return Err(format!("额外备份目录失败：{}", e))
+        }
+    } else {
+        0
+    };
+
+    let mut msg = format!("已备份 {} 个文件到 backup/", count1);
+    if count2 > 0 {
+        msg.push_str(&format!(" 和 {} 个文件到额外目录", count2));
+    }
+    Ok(msg)
+}
+
+/// 打开备份目录（支持打开两个位置）
+fn open_backup_directory(config_path: &str, extra_backup_dir: Option<&str>) -> Result<String, String> {
+    use std::path::Path;
+    use std::process::Command;
+
+    let mut opened = Vec::new();
+
+    // 打开默认备份目录
+    let config_src = Path::new(config_path);
+    let data_dir = config_src.parent().ok_or("无法获取数据目录")?;
+    let backup_dir = data_dir.join("backup");
+
+    if backup_dir.exists() {
+        let backup_path = backup_dir.to_string_lossy().to_string();
+        #[cfg(windows)]
+        {
+            Command::new("explorer")
+                .arg(&backup_path)
+                .spawn()
+                .map_err(|e| format!("打开默认备份目录失败：{}", e))?;
+        }
+        #[cfg(not(windows))]
+        {
+            Command::new("xdg-open")
+                .arg(&backup_path)
+                .spawn()
+                .map_err(|e| format!("打开默认备份目录失败：{}", e))?;
+        }
+        opened.push("默认备份目录");
+    }
+
+    // 打开额外备份目录（如果配置了）
+    if let Some(extra_dir) = extra_backup_dir.filter(|s| !s.is_empty()) {
+        let extra_path = Path::new(extra_dir);
+        if extra_path.exists() {
+            let extra_path_str = extra_path.to_string_lossy().to_string();
+            #[cfg(windows)]
+            {
+                Command::new("explorer")
+                    .arg(&extra_path_str)
+                    .spawn()
+                    .map_err(|e| format!("打开额外备份目录失败：{}", e))?;
+            }
+            #[cfg(not(windows))]
+            {
+                Command::new("xdg-open")
+                    .arg(&extra_path_str)
+                    .spawn()
+                    .map_err(|e| format!("打开额外备份目录失败：{}", e))?;
+            }
+            opened.push("额外备份目录");
+        }
+    }
+
+    if opened.is_empty() {
         return Err("备份目录不存在".to_string());
     }
 
-    let backup_path = backup_dir.to_string_lossy().to_string();
-    #[cfg(windows)]
-    {
-        Command::new("explorer")
-            .arg(&backup_path)
-            .spawn()
-            .map_err(|e| format!("打开目录失败：{}", e))?;
-    }
-    #[cfg(not(windows))]
-    {
-        Command::new("xdg-open")
-            .arg(&backup_path)
-            .spawn()
-            .map_err(|e| format!("打开目录失败：{}", e))?;
-    }
-
-    Ok(())
+    Ok(format!("已打开：{}", opened.join(" 和 ")))
 }
 
 /// 从 Unix epoch 天数计算 (年, 月, 日)

@@ -35,6 +35,8 @@ pub struct Global {
     pub test_model: String,
     #[serde(default)]
     pub test_timeout_secs: u64,
+    #[serde(default)]
+    pub backup_directory: String,  // 额外的备份目录，为空则只备份到程序目录下的 backup/
 }
 
 fn default_env_hints() -> String {
@@ -72,6 +74,7 @@ impl ConfigManager {
                     default_config: String::new(),
                     test_model:     "claude-haiku-4-5".to_string(),
                     test_timeout_secs: 10,
+                    backup_directory: String::new(),
                 },
                 tools: vec![],
                 configs: vec![],
