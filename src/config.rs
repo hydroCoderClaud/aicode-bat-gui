@@ -1,6 +1,6 @@
 // 配置文件结构定义
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeMap};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tool {
@@ -23,7 +23,7 @@ pub struct Config {
     pub key: String,
     pub key_type: String,
     pub proxy: String,
-    pub extra_env: HashMap<String, String>,
+    pub extra_env: BTreeMap<String, String>,
     pub command_args: String,
 }
 

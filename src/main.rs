@@ -6,7 +6,7 @@ mod keychain;
 mod launcher;
 
 use eframe::egui;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -1357,7 +1357,7 @@ fn cfg_to_form(cfg: &config::Config, last_dir: &str) -> EditForm {
 }
 
 fn form_to_cfg(form: &EditForm) -> config::Config {
-    let extra_env: HashMap<String, String> = form.extra_env_text
+    let extra_env: BTreeMap<String, String> = form.extra_env_text
         .lines()
         .filter_map(|line| {
             let line = line.trim();
