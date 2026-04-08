@@ -1384,15 +1384,23 @@ fn form_to_cfg(form: &EditForm) -> config::Config {
 }
 
 fn resolve_config_path() -> String {
-    // 优先级：exe 同目录（便携模式）→ %AppData%/aicode-bat-gui（安装模式）
+    // 优先级：exe 同目录（优先）→ %AppData%/aicode-bat-gui（降级）
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|p| p.to_path_buf()))
         .unwrap_or_else(|| ".".into());
 
+    // 优先尝试 exe 目录（便携模式或首次使用）
     let local = exe_dir.join("launcher_config.json");
-    if local.exists() { return local.to_string_lossy().into_owned(); }
+    if local.exists() {
+        return local.to_string_lossy().into_owned();
+    }
+    // exe 目录不存在时，尝试创建（如果可写）
+    if std::fs::write(&local, r#"{"global":{"last_directory":"","default_config":"","test_model":"claude-haiku-4-5","test_timeout_secs":10,"backup_directory":""},"tools":[],"configs":[],"env_hints":"ANTHROPIC_MODEL=Claude - 覆盖默认模型\nANTHROPIC_DEFAULT_OPUS_MODEL=Claude - 映射 Opus 到指定模型\nANTHROPIC_DEFAULT_SONNET_MODEL=Claude - 映射 Sonnet 到指定模型\nANTHROPIC_DEFAULT_HAIKU_MODEL=Claude - 映射 Haiku 到指定模型\nCLAUDE_AUTOCOMPACT_PCT_OVERRIDE=Claude - 上下文压缩触发百分比（0-100）\nOPENAI_MODEL=Qwen/OpenAI 兼容 - 覆盖默认模型\nGEMINI_MODEL=Gemini - 覆盖默认模型"}"#).is_ok() {
+        return local.to_string_lossy().into_owned();
+    }
 
+    // exe 目录不可写时，降级到 AppData
     let app_dir = dirs::config_dir()
         .map(|p| p.join("aicode-bat-gui"))
         .unwrap_or_else(|| exe_dir.clone());
@@ -1401,18 +1409,23 @@ fn resolve_config_path() -> String {
 }
 
 fn resolve_keychain_path() -> String {
-    // 与 resolve_config_path 相同逻辑，只是文件名不同
+    // 与 resolve_config_path 相同逻辑，优先 exe 目录
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|p| p.to_path_buf()))
         .unwrap_or_else(|| ".".into());
 
-    // 便携模式：与 launcher_config.json 同目录
-    let local_cfg = exe_dir.join("launcher_config.json");
-    if local_cfg.exists() {
-        return exe_dir.join("keychain.json").to_string_lossy().into_owned();
+    // 优先尝试 exe 目录
+    let local_kc = exe_dir.join("keychain.json");
+    if local_kc.exists() {
+        return local_kc.to_string_lossy().into_owned();
+    }
+    // 尝试在 exe 目录创建
+    if std::fs::write(&local_kc, r#"{"entries":[]}"#).is_ok() {
+        return local_kc.to_string_lossy().into_owned();
     }
 
+    // exe 目录不可写时，降级到 AppData
     let app_dir = dirs::config_dir()
         .map(|p| p.join("aicode-bat-gui"))
         .unwrap_or_else(|| exe_dir.clone());
