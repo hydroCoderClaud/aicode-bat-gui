@@ -1,14 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod api_test;
 mod config;
 mod keychain;
 mod launcher;
 
 use eframe::egui;
-use std::collections::BTreeMap;
-use std::collections::HashSet;
-use std::sync::mpsc;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
@@ -122,7 +119,6 @@ struct LauncherApp {
     status:         String,
     dark_mode:      bool,
     pending_delete: bool,
-    test_rx:        Option<mpsc::Receiver<Result<String, String>>>,
     show_tool_mgr:  bool,
     new_tool_form:  NewToolForm,
     config_search:  String,  // 配置列表搜索框
@@ -217,7 +213,6 @@ impl LauncherApp {
             status:         "就绪".into(),
             dark_mode:      false,
             pending_delete: false,
-            test_rx:        None,
             show_tool_mgr:  false,
             new_tool_form:  NewToolForm::default(),
             config_search:  String::new(),
@@ -277,45 +272,6 @@ impl LauncherApp {
         self.form           = None;
         self.pending_delete = false;
         self.status         = format!("已删除：{}", name);
-    }
-
-    fn test_connection(&mut self) {
-        let form = match &self.form { Some(f) => f.clone(), None => return };
-        if form.base_url.is_empty() {
-            self.status = "API 地址为空，无法测试".into();
-            return;
-        }
-        self.status = "正在测试连接...".into();
-
-        let (tx, rx) = mpsc::channel();
-        self.test_rx = Some(rx);
-
-        let (url, key, key_type, tool) = (
-            form.base_url.clone(),
-            form.key.clone(),
-            form.key_type.clone(),
-            form.tool.clone(),
-        );
-        let proxy = (!form.proxy.is_empty()).then_some(form.proxy.clone());
-        // 模型优先级：extra_env ANTHROPIC_MODEL > global.test_model
-        let model = form.extra_env_text.lines().find_map(|line| {
-            let line = line.trim();
-            line.strip_prefix("ANTHROPIC_MODEL=").map(|v| v.trim().to_string())
-        }).unwrap_or_else(|| self.config_mgr.data.global.test_model.clone());
-        let timeout_secs = self.config_mgr.data.global.test_timeout_secs;
-
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            let res = rt.block_on(async {
-                match tool.as_str() {
-                    "claude" => api_test::test_anthropic(&url, &key, &key_type, proxy.as_deref(), Some(&model), timeout_secs).await,
-                    "qwen" | "codex" => api_test::test_openai(&url, &key, proxy.as_deref(), timeout_secs).await,
-                    "gemini" => api_test::test_gemini(&url, &key, proxy.as_deref(), timeout_secs).await,
-                    _ => api_test::test_generic(&url, proxy.as_deref(), timeout_secs).await,
-                }
-            });
-            let _ = tx.send(res);
-        });
     }
 
     fn launch(&mut self) {
@@ -779,16 +735,6 @@ impl eframe::App for LauncherApp {
             unsafe { ShowWindow(self.hwnd, SW_HIDE); }
         }
 
-        // 轮询异步测试结果
-        if let Some(rx) = &self.test_rx {
-            match rx.try_recv() {
-                Ok(Ok(msg))  => { self.status = format!("✅ {}", msg); self.test_rx = None; }
-                Ok(Err(e))   => { self.status = format!("❌ {}", e);   self.test_rx = None; }
-                Err(mpsc::TryRecvError::Empty) => ctx.request_repaint(),
-                Err(_) => self.test_rx = None,
-            }
-        }
-
         // 主题
         ctx.set_visuals(if self.dark_mode {
             egui::Visuals::dark()
@@ -849,7 +795,6 @@ impl eframe::App for LauncherApp {
         // ── 状态栏 ────────────────────────────────────────────────────────────
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if self.test_rx.is_some() { ui.spinner(); }
                 ui.label(&self.status);
             });
         });
@@ -863,7 +808,6 @@ impl eframe::App for LauncherApp {
         let mut do_delete_click   = false;
         let mut do_delete_confirm = false;
         let mut do_delete_cancel  = false;
-        let mut do_test           = false;
         let mut do_launch         = false;
         let mut select_id: Option<String> = None;
         let mut launch_id: Option<String> = None;
@@ -930,8 +874,7 @@ impl eframe::App for LauncherApp {
         // ── 右侧表单 ──────────────────────────────────────────────────────────
         egui::CentralPanel::default().show(ctx, |ui| {
             // 提前取出只读数据，避免与 self.form 的可变借用冲突
-            let tools:   Vec<config::Tool> = self.config_mgr.data.tools.clone();
-            let testing: bool              = self.test_rx.is_some();
+            let tools: Vec<config::Tool> = self.config_mgr.data.tools.clone();
 
             match &mut self.form {
                 None => {
@@ -1096,10 +1039,6 @@ impl eframe::App for LauncherApp {
                                 if ui.button("🗑 删除").clicked() { do_delete_click = true; }
                             }
 
-                            ui.add_enabled_ui(!testing, |ui| {
-                                if ui.button("🔍 测试连接").clicked() { do_test = true; }
-                            });
-
                             if ui.button("⬆").on_hover_text("上移").clicked() { do_move_up = true; }
                             if ui.button("⬇").on_hover_text("下移").clicked() { do_move_down = true; }
 
@@ -1107,42 +1046,6 @@ impl eframe::App for LauncherApp {
                                 if ui.button("  ▶ 启 动  ").clicked() { do_launch = true; }
                             });
                         });
-
-                        // 全局设置分隔线
-                        ui.add_space(4.0);
-                        ui.separator();
-                        ui.add_space(4.0);
-
-                        // 全局设置区域
-                        ui.label(egui::RichText::new("全局设置").strong());
-                        ui.add_space(4.0);
-
-                        ui.horizontal(|ui| {
-                            ui.label("测试模型:");
-                            let resp = ui.add(
-                                egui::TextEdit::singleline(&mut self.config_mgr.data.global.test_model)
-                                    .hint_text("claude-haiku-4-5")
-                                    .desired_width(140.0),
-                            ).on_hover_text("仅用于 Claude 工具的测试连接，指定发送的模型名（全局设置，不可为空）");
-                            if resp.changed() {
-                                if self.config_mgr.data.global.test_model.trim().is_empty() {
-                                    self.config_mgr.data.global.test_model = "claude-haiku-4-5".to_string();
-                                }
-                                let _ = self.config_mgr.save();
-                            }
-
-                            ui.label("超时:");
-                            let to_resp = ui.add(
-                                egui::DragValue::new(&mut self.config_mgr.data.global.test_timeout_secs)
-                                    .range(1..=300)
-                                    .suffix("s"),
-                            ).on_hover_text("测试连接超时（秒），全局设置");
-                            if to_resp.changed() { let _ = self.config_mgr.save(); }
-                        });
-
-                        ui.add_space(4.0);
-                        ui.separator();
-                        ui.add_space(4.0);
 
                         // 备份目录配置
                         ui.label(egui::RichText::new("备份设置").strong());
@@ -1244,7 +1147,6 @@ impl eframe::App for LauncherApp {
         if do_delete_click   { self.pending_delete = true; }
         if do_delete_confirm { self.delete(); }
         if do_delete_cancel  { self.pending_delete = false; }
-        if do_test           { self.test_connection(); }
         if do_launch         { self.launch(); }
         if do_toggle_tool_mgr { self.show_tool_mgr = !self.show_tool_mgr; }
         if do_move_up   { self.config_mgr.move_config_up(&self.selected_id.clone()); }
@@ -1396,7 +1298,7 @@ fn resolve_config_path() -> String {
         return local.to_string_lossy().into_owned();
     }
     // exe 目录不存在时，尝试创建（如果可写）
-    if std::fs::write(&local, r#"{"global":{"last_directory":"","default_config":"","test_model":"claude-haiku-4-5","test_timeout_secs":10,"backup_directory":""},"tools":[],"configs":[],"env_hints":"ANTHROPIC_MODEL=Claude - 覆盖默认模型\nANTHROPIC_DEFAULT_OPUS_MODEL=Claude - 映射 Opus 到指定模型\nANTHROPIC_DEFAULT_SONNET_MODEL=Claude - 映射 Sonnet 到指定模型\nANTHROPIC_DEFAULT_HAIKU_MODEL=Claude - 映射 Haiku 到指定模型\nCLAUDE_AUTOCOMPACT_PCT_OVERRIDE=Claude - 上下文压缩触发百分比（0-100）\nOPENAI_MODEL=Qwen/OpenAI 兼容 - 覆盖默认模型\nGEMINI_MODEL=Gemini - 覆盖默认模型"}"#).is_ok() {
+    if std::fs::write(&local, r#"{"global":{"last_directory":"","default_config":"","backup_directory":""},"tools":[],"configs":[],"env_hints":"ANTHROPIC_MODEL=Claude - 覆盖默认模型\nANTHROPIC_DEFAULT_OPUS_MODEL=Claude - 映射 Opus 到指定模型\nANTHROPIC_DEFAULT_SONNET_MODEL=Claude - 映射 Sonnet 到指定模型\nANTHROPIC_DEFAULT_HAIKU_MODEL=Claude - 映射 Haiku 到指定模型\nCLAUDE_AUTOCOMPACT_PCT_OVERRIDE=Claude - 上下文压缩触发百分比（0-100）\nOPENAI_MODEL=Qwen/OpenAI 兼容 - 覆盖默认模型\nGEMINI_MODEL=Gemini - 覆盖默认模型"}"#).is_ok() {
         return local.to_string_lossy().into_owned();
     }
 

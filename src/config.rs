@@ -32,10 +32,6 @@ pub struct Global {
     pub last_directory: String,
     pub default_config: String,
     #[serde(default)]
-    pub test_model: String,
-    #[serde(default)]
-    pub test_timeout_secs: u64,
-    #[serde(default)]
     pub backup_directory: String,  // 额外的备份目录，为空则只备份到程序目录下的 backup/
 }
 
@@ -72,8 +68,6 @@ impl ConfigManager {
                 global: Global {
                     last_directory: String::new(),
                     default_config: String::new(),
-                    test_model:     "claude-haiku-4-5".to_string(),
-                    test_timeout_secs: 10,
                     backup_directory: String::new(),
                 },
                 tools: vec![],
@@ -93,12 +87,6 @@ impl ConfigManager {
                     self.data = data;
                 }
             }
-        }
-        if self.data.global.test_model.trim().is_empty() {
-            self.data.global.test_model = "claude-haiku-4-5".to_string();
-        }
-        if self.data.global.test_timeout_secs == 0 {
-            self.data.global.test_timeout_secs = 10;
         }
     }
 
