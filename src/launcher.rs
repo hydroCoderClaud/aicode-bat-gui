@@ -29,17 +29,20 @@ pub fn launch_cli(
         let dir = directory.trim_end_matches(['\\', '/']);
 
         // 使用 Windows Terminal (wt.exe) 启动 PowerShell 配置文件
-        // -M 0.5 设置窗口透明度为 50%（可选，如不需要可移除）
+        // -d 指定起始目录（wt.exe 不继承 process::Command 的 current_dir）
         let mut proc = Command::new("wt");
-        proc.args([
+        let mut args: Vec<&str> = Vec::new();
+        if !dir.is_empty() {
+            args.push("-d");
+            args.push(dir);
+        }
+        args.extend_from_slice(&[
             "powershell",
             "-NoExit",
             "-ExecutionPolicy", "Bypass",
             "-File", ps1_str.as_ref(),
         ]);
-        if !dir.is_empty() {
-            proc.current_dir(dir);
-        }
+        proc.args(&args);
 
         match proc.spawn() {
             Ok(_) => Ok(format!("已启动：{} @ {}", config.name, directory)),
