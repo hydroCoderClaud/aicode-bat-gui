@@ -7,7 +7,12 @@ mod launcher;
 use eframe::egui;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
+#[cfg(windows)]
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+#[cfg(target_os = "macos")]
+use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(target_os = "macos")]
+use std::thread;
 
 // ── Win32 FFI：用于隐藏/显示窗口 ────────────────────────────────────────────
 #[cfg(windows)]
@@ -28,6 +33,16 @@ const ERROR_ALREADY_EXISTS: u32 = 183;
 // ── 入口 ─────────────────────────────────────────────────────────────────────
 
 fn main() -> eframe::Result {
+    #[cfg(target_os = "macos")]
+    let _single_instance = match ensure_macos_single_instance() {
+        Ok(Some(guard)) => Some(guard),
+        Ok(None) => return Ok(()),
+        Err(e) => {
+            eprintln!("single-instance init failed: {}", e);
+            None
+        }
+    };
+
     // 单实例检测：用命名 Mutex 确保只有一个实例运行
     #[cfg(windows)]
     {
@@ -36,10 +51,7 @@ fn main() -> eframe::Result {
             let _handle = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
             if GetLastError() == ERROR_ALREADY_EXISTS {
                 // 已有实例运行：将右键目录写入临时文件，激活窗口后退出
-                if let Some(dir) = std::env::args().nth(1).filter(|p| std::path::Path::new(p).is_dir()) {
-                    let path = std::env::temp_dir().join("aicode-bat-gui-open-dir.txt");
-                    let _ = std::fs::write(&path, &dir);
-                }
+                signal_existing_instance();
                 let title: Vec<u16> = "CLI 启动管理器\0".encode_utf16().collect();
                 let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
                 if hwnd != 0 {
@@ -85,12 +97,26 @@ fn main() -> eframe::Result {
 
 /// 从 Windows 系统字体目录加载 CJK 字体，使中文正常显示
 fn load_cjk_font(ctx: &egui::Context) {
-    let candidates = [
-        r"C:\Windows\Fonts\msyh.ttc",   // 微软雅黑
-        r"C:\Windows\Fonts\simsun.ttc", // 宋体
-        r"C:\Windows\Fonts\simhei.ttf", // 黑体
+    #[cfg(target_os = "macos")]
+    let candidates: &[&str] = &[
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "/System/Library/Fonts/STHeiti Light.ttc",
     ];
-    for path in &candidates {
+    #[cfg(windows)]
+    let candidates: &[&str] = &[
+        r"C:\Windows\Fonts\msyh.ttc",
+        r"C:\Windows\Fonts\simsun.ttc",
+        r"C:\Windows\Fonts\simhei.ttf",
+    ];
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    let candidates: &[&str] = &[
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        "/usr/share/fonts/truetype/arphic/ukai.ttc",
+    ];
+
+    for path in candidates {
         if let Ok(data) = std::fs::read(path) {
             let mut fonts = egui::FontDefinitions::default();
             fonts.font_data.insert("cjk".to_owned(), egui::FontData::from_owned(data));
@@ -123,10 +149,13 @@ struct LauncherApp {
     new_tool_form:  NewToolForm,
     config_search:  String,  // 配置列表搜索框
     // 系统托盘
+    #[cfg(windows)]
     tray_icon:      Option<tray_icon::TrayIcon>,
-    menu_quit_id:   Option<tray_icon::menu::MenuId>,
+    #[cfg(windows)]
     hwnd:           isize,
+    #[cfg(windows)]
     tray_quit:      Arc<AtomicBool>,
+    #[cfg(windows)]
     tray_switch_tab: Arc<AtomicU8>,  // 0=无, 1=AICLI启动, 2=密码助手
     // 密码助手
     keychain_mgr:       keychain::KeychainManager,
@@ -179,26 +208,17 @@ impl LauncherApp {
         let config_mgr = config::ConfigManager::new(resolve_config_path());
         let keychain_mgr = keychain::KeychainManager::new(resolve_keychain_path());
 
-        // 优先级：命令行参数(%V，右键菜单) > cwd(任何合法目录) > 配置记录的上次目录
-        // 注：右键 exe 直接打开时 Explorer 会把 CWD 设为 exe 所在目录，这是合法的工作目录；
-        //     只排除 Windows 系统目录（从开始菜单启动时 CWD 可能为 System32 等）
+        // Windows 优先级：命令行参数(%V，右键菜单) > cwd(任何合法目录) > 配置记录的上次目录
+        // macOS/Linux 优先级：命令行参数(Quick Action) > 配置记录的上次目录 > 合法 cwd
+        // 注：Windows 下右键 exe 直接打开时 Explorer 会把 CWD 设为 exe 所在目录，这是合法的工作目录；
+        //     但 macOS 的 .app 启动 cwd 不稳定，不能覆盖已保存的 last_directory。
         let arg_dir = std::env::args().nth(1)
             .filter(|p| std::path::Path::new(p).is_dir());
         let cwd = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
-        let cwd_is_sys = {
-            let lower = cwd.to_lowercase().replace('/', "\\");
-            lower.contains("\\windows\\system32")
-                || lower.contains("\\windows\\syswow64")
-        };
-        let last_dir = if let Some(d) = arg_dir {
-            d
-        } else if !cwd.is_empty() && !cwd_is_sys {
-            cwd
-        } else {
-            config_mgr.data.global.last_directory.clone()
-        };
+        let saved_dir = config_mgr.data.global.last_directory.clone();
+        let last_dir = initial_working_directory(arg_dir, &cwd, &saved_dir);
 
         let (selected_id, form) = config_mgr
             .find_default_config()
@@ -216,10 +236,13 @@ impl LauncherApp {
             show_tool_mgr:  false,
             new_tool_form:  NewToolForm::default(),
             config_search:  String::new(),
+            #[cfg(windows)]
             tray_icon:      None,
-            menu_quit_id:   None,
+            #[cfg(windows)]
             hwnd:           0,
+            #[cfg(windows)]
             tray_quit:      Arc::new(AtomicBool::new(false)),
+            #[cfg(windows)]
             tray_switch_tab: Arc::new(AtomicU8::new(0)),
             keychain_mgr,
             kc_selected_id:     String::new(),
@@ -230,6 +253,112 @@ impl LauncherApp {
             kc_pending_delete:  false,
         }
     }
+}
+
+fn initial_working_directory(arg_dir: Option<String>, cwd: &str, saved_dir: &str) -> String {
+    if let Some(dir) = arg_dir {
+        return dir;
+    }
+
+    #[cfg(windows)]
+    {
+        let lower = cwd.to_lowercase().replace('/', "\\");
+        let cwd_is_sys = lower.contains("\\windows\\system32")
+            || lower.contains("\\windows\\syswow64");
+        if !cwd.is_empty() && !cwd_is_sys {
+            return cwd.to_string();
+        }
+        return saved_dir.to_string();
+    }
+
+    #[cfg(not(windows))]
+    {
+        if !saved_dir.is_empty() {
+            return saved_dir.to_string();
+        }
+
+        let normalized = cwd.replace('\\', "/");
+        let cwd_looks_like_app_bundle = normalized.contains(".app/Contents/MacOS");
+        if !cwd.is_empty() && cwd != "/" && !cwd_looks_like_app_bundle {
+            return cwd.to_string();
+        }
+
+        String::new()
+    }
+}
+
+fn open_dir_signal_path() -> std::path::PathBuf {
+    std::env::temp_dir().join("aicode-bat-gui-open-dir.txt")
+}
+
+fn activate_signal_path() -> std::path::PathBuf {
+    std::env::temp_dir().join("aicode-bat-gui-activate.flag")
+}
+
+fn signal_existing_instance() {
+    if let Some(dir) = std::env::args().nth(1).filter(|p| std::path::Path::new(p).is_dir()) {
+        let _ = std::fs::write(open_dir_signal_path(), dir);
+    }
+    let _ = std::fs::write(activate_signal_path(), b"1");
+}
+
+#[cfg(target_os = "macos")]
+struct SingleInstanceGuard {
+    socket_path: std::path::PathBuf,
+    _listener: UnixListener,
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for SingleInstanceGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.socket_path);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_macos_single_instance() -> Result<Option<SingleInstanceGuard>, String> {
+    let socket_dir = dirs::config_dir()
+        .map(|p| p.join("aicode-bat-gui"))
+        .unwrap_or_else(std::env::temp_dir);
+    std::fs::create_dir_all(&socket_dir)
+        .map_err(|e| format!("创建单实例目录失败：{}", e))?;
+    let socket_path = socket_dir.join("instance.sock");
+
+    match UnixListener::bind(&socket_path) {
+        Ok(listener) => {
+            start_single_instance_accept_loop(&listener)?;
+            Ok(Some(SingleInstanceGuard {
+                socket_path,
+                _listener: listener,
+            }))
+        }
+        Err(_) => {
+            if UnixStream::connect(&socket_path).is_ok() {
+                signal_existing_instance();
+                return Ok(None);
+            }
+
+            let _ = std::fs::remove_file(&socket_path);
+            let listener = UnixListener::bind(&socket_path)
+                .map_err(|e| format!("创建单实例锁失败：{}", e))?;
+            start_single_instance_accept_loop(&listener)?;
+            Ok(Some(SingleInstanceGuard {
+                socket_path,
+                _listener: listener,
+            }))
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn start_single_instance_accept_loop(listener: &UnixListener) -> Result<(), String> {
+    let accept_listener = listener
+        .try_clone()
+        .map_err(|e| format!("复制单实例监听器失败：{}", e))?;
+    thread::spawn(move || {
+        while let Ok((_stream, _addr)) = accept_listener.accept() {}
+    });
+    Ok(())
 }
 
 // ── 业务逻辑 ──────────────────────────────────────────────────────────────────
@@ -622,7 +751,9 @@ impl eframe::App for LauncherApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // ── 检查其他实例传来的右键打开目录 ───────────────────────────────
         {
-            let path = std::env::temp_dir().join("aicode-bat-gui-open-dir.txt");
+            let path = open_dir_signal_path();
+            #[cfg(target_os = "macos")]
+            let mut activate_window = false;
             if let Ok(dir) = std::fs::read_to_string(&path) {
                 let _ = std::fs::remove_file(&path);
                 let dir = dir.trim().to_string();
@@ -631,7 +762,25 @@ impl eframe::App for LauncherApp {
                         form.directory = dir.clone();
                     }
                     self.config_mgr.data.global.last_directory = dir;
+                    let _ = self.config_mgr.save();
+                    #[cfg(target_os = "macos")]
+                    {
+                        activate_window = true;
+                    }
                 }
+            }
+            if activate_signal_path().exists() {
+                let _ = std::fs::remove_file(activate_signal_path());
+                #[cfg(target_os = "macos")]
+                {
+                    activate_window = true;
+                }
+            }
+            #[cfg(target_os = "macos")]
+            if activate_window {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             }
         }
 
@@ -663,7 +812,6 @@ impl eframe::App for LauncherApp {
                         let launch_id = item_launch.id().clone();
                         let keychain_id = item_keychain.id().clone();
                         let quit_id = item_quit.id().clone();
-                        self.menu_quit_id = Some(quit_id.clone());
 
                         // 用 set_event_handler 注册回调：窗口隐藏后 update() 不再被调用，
                         // 但 Windows 消息分发仍会触发这些回调，因此可直接调用 Win32 API。
@@ -761,10 +909,24 @@ impl eframe::App for LauncherApp {
                             Err(e) => self.status = format!("❌ 注册失败：{}", e),
                         }
                     }
+                    #[cfg(target_os = "macos")]
+                    if ui.button("📌 安装 Finder 右键").on_hover_text("在 Finder 文件夹右键菜单中添加「Open in AICode BAT GUI」").clicked() {
+                        match register_context_menu() {
+                            Ok(_)  => self.status = "✅ Finder 右键安装成功".into(),
+                            Err(e) => self.status = format!("❌ 安装失败：{}", e),
+                        }
+                    }
                     #[cfg(windows)]
                     if ui.button("🗑 卸载右键菜单").clicked() {
                         match unregister_context_menu() {
                             Ok(_)  => self.status = "✅ 右键菜单已卸载".into(),
+                            Err(e) => self.status = format!("❌ 卸载失败：{}", e),
+                        }
+                    }
+                    #[cfg(target_os = "macos")]
+                    if ui.button("🗑 卸载 Finder 右键").clicked() {
+                        match unregister_context_menu() {
+                            Ok(_)  => self.status = "✅ Finder 右键已卸载".into(),
                             Err(e) => self.status = format!("❌ 卸载失败：{}", e),
                         }
                     }
@@ -1229,6 +1391,10 @@ fn tool_manager_window(
                     let w = 240.0;
                     ui.label("名称:"); ui.add(egui::TextEdit::singleline(&mut new_form.vendor).hint_text("如 Moonshot").desired_width(w)); ui.end_row();
                     ui.label("命令:"); ui.add(egui::TextEdit::singleline(&mut new_form.command).hint_text("如 kimi").desired_width(w)); ui.end_row();
+                    ui.label("Base URL 变量:"); ui.add(egui::TextEdit::singleline(&mut new_form.env_base_url).hint_text("如 ANTHROPIC_BASE_URL").desired_width(w)); ui.end_row();
+                    ui.label("Auth Token 变量:"); ui.add(egui::TextEdit::singleline(&mut new_form.env_auth_token).hint_text("如 ANTHROPIC_AUTH_TOKEN").desired_width(w)); ui.end_row();
+                    ui.label("API Key 变量:"); ui.add(egui::TextEdit::singleline(&mut new_form.env_api_key).hint_text("如 ANTHROPIC_API_KEY").desired_width(w)); ui.end_row();
+                    ui.label("代理变量:"); ui.add(egui::TextEdit::singleline(&mut new_form.env_proxy).hint_text("如 HTTPS_PROXY").desired_width(w)); ui.end_row();
                 });
 
             ui.add_space(4.0);
@@ -1285,6 +1451,33 @@ fn form_to_cfg(form: &EditForm) -> config::Config {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn resolve_config_path() -> String {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| ".".into());
+    let local = exe_dir.join("launcher_config.json");
+    let app_dir = dirs::config_dir()
+        .map(|p| p.join("aicode-bat-gui"))
+        .unwrap_or_else(|| exe_dir.clone());
+    let app_cfg = app_dir.join("launcher_config.json");
+    let _ = std::fs::create_dir_all(&app_dir);
+
+    if app_cfg.exists() {
+        return app_cfg.to_string_lossy().into_owned();
+    }
+
+    if local.exists() && std::fs::copy(&local, &app_cfg).is_ok() {
+        return app_cfg.to_string_lossy().into_owned();
+    }
+
+    let default_content = r#"{"global":{"last_directory":"","default_config":"","backup_directory":""},"tools":[],"configs":[],"env_hints":"ANTHROPIC_MODEL=Claude - 覆盖默认模型\nANTHROPIC_DEFAULT_OPUS_MODEL=Claude - 映射 Opus 到指定模型\nANTHROPIC_DEFAULT_SONNET_MODEL=Claude - 映射 Sonnet 到指定模型\nANTHROPIC_DEFAULT_HAIKU_MODEL=Claude - 映射 Haiku 到指定模型\nCLAUDE_AUTOCOMPACT_PCT_OVERRIDE=Claude - 上下文压缩触发百分比（0-100）\nOPENAI_MODEL=Qwen/OpenAI 兼容 - 覆盖默认模型\nGEMINI_MODEL=Gemini - 覆盖默认模型"}"#;
+    let _ = std::fs::write(&app_cfg, default_content);
+    app_cfg.to_string_lossy().into_owned()
+}
+
+#[cfg(not(target_os = "macos"))]
 fn resolve_config_path() -> String {
     // 优先级：exe 同目录（便携模式）→ %AppData%/aicode-bat-gui（安装模式）
     let exe_dir = std::env::current_exe()
@@ -1316,6 +1509,32 @@ fn resolve_config_path() -> String {
     app_dir.join("launcher_config.json").to_string_lossy().into_owned()
 }
 
+#[cfg(target_os = "macos")]
+fn resolve_keychain_path() -> String {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| ".".into());
+    let local_kc = exe_dir.join("keychain.json");
+    let app_dir = dirs::config_dir()
+        .map(|p| p.join("aicode-bat-gui"))
+        .unwrap_or_else(|| exe_dir.clone());
+    let app_kc = app_dir.join("keychain.json");
+    let _ = std::fs::create_dir_all(&app_dir);
+
+    if app_kc.exists() {
+        return app_kc.to_string_lossy().into_owned();
+    }
+
+    if local_kc.exists() && std::fs::copy(&local_kc, &app_kc).is_ok() {
+        return app_kc.to_string_lossy().into_owned();
+    }
+
+    let _ = std::fs::write(&app_kc, r#"{"entries":[]}"#);
+    app_kc.to_string_lossy().into_owned()
+}
+
+#[cfg(not(target_os = "macos"))]
 fn resolve_keychain_path() -> String {
     // 与 resolve_config_path 相同逻辑，优先 exe 目录
     let exe_dir = std::env::current_exe()
@@ -1407,6 +1626,233 @@ fn unregister_context_menu() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn register_context_menu() -> Result<(), String> {
+    let services_dir = dirs::home_dir()
+        .ok_or("无法获取用户目录")?
+        .join("Library/Services");
+    std::fs::create_dir_all(&services_dir)
+        .map_err(|e| format!("创建 Services 目录失败：{}", e))?;
+
+    let workflow_dir = services_dir.join("Open in AICode BAT GUI.workflow");
+    let contents_dir = workflow_dir.join("Contents");
+    let resources_dir = contents_dir.join("Resources");
+
+    if workflow_dir.exists() {
+        std::fs::remove_dir_all(&workflow_dir)
+            .map_err(|e| format!("覆盖旧的 Finder 右键失败：{}", e))?;
+    }
+    std::fs::create_dir_all(&resources_dir)
+        .map_err(|e| format!("创建 workflow 目录失败：{}", e))?;
+
+    let launch_command = macos_quick_action_command()?;
+    let command = format!(
+        "selected_path=\"$1\"\nif [ -z \"$selected_path\" ] || [ ! -d \"$selected_path\" ]; then\n  exit 0\nfi\nnohup {} \"$selected_path\" >/tmp/aicode-bat-gui-quick-action.log 2>&1 &\n",
+        launch_command,
+    );
+
+    let info_plist = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en_US</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.hydrocoderclaud.aicode-bat-gui.service</string>
+	<key>CFBundleName</key>
+	<string>AICode BAT GUI</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>NSServices</key>
+	<array>
+		<dict>
+			<key>NSMenuItem</key>
+			<dict>
+				<key>default</key>
+				<string>Open in AICode BAT GUI</string>
+			</dict>
+			<key>NSMessage</key>
+			<string>runWorkflowAsService</string>
+			<key>NSSendFileTypes</key>
+			<array>
+				<string>public.folder</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>
+"#;
+
+    let document_wflow = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>AMApplicationBuild</key>
+	<string>554</string>
+	<key>AMApplicationVersion</key>
+	<string>2.10</string>
+	<key>AMDocumentVersion</key>
+	<string>2</string>
+	<key>actions</key>
+	<array>
+		<dict>
+			<key>action</key>
+			<dict>
+				<key>AMAccepts</key>
+				<dict>
+					<key>Container</key>
+					<string>List</string>
+					<key>Optional</key>
+					<true/>
+					<key>Types</key>
+					<array>
+						<string>com.apple.cocoa.path</string>
+					</array>
+				</dict>
+				<key>AMActionVersion</key>
+				<string>2.0.3</string>
+				<key>AMParameterProperties</key>
+				<dict/>
+				<key>AMProvides</key>
+				<dict>
+					<key>Container</key>
+					<string>List</string>
+					<key>Types</key>
+					<array>
+						<string>com.apple.cocoa.string</string>
+					</array>
+				</dict>
+				<key>ActionBundlePath</key>
+				<string>/System/Library/Automator/Run Shell Script.action</string>
+				<key>ActionName</key>
+				<string>Run Shell Script</string>
+				<key>ActionParameters</key>
+				<dict>
+					<key>CheckedForUserDefaultShell</key>
+					<false/>
+					<key>COMMAND_STRING</key>
+					<string>{}</string>
+					<key>inputMethod</key>
+					<integer>1</integer>
+					<key>shell</key>
+					<string>/bin/zsh</string>
+					<key>source</key>
+					<string></string>
+				</dict>
+				<key>Application</key>
+				<array>
+					<string>Automator</string>
+				</array>
+				<key>BundleIdentifier</key>
+				<string>com.apple.RunShellScript</string>
+				<key>CFBundleVersion</key>
+				<string>2.0.3</string>
+				<key>CanShowWhenRun</key>
+				<true/>
+				<key>Category</key>
+				<array>
+					<string>AMCategoryUtilities</string>
+				</array>
+				<key>Class Name</key>
+				<string>RunShellScriptAction</string>
+				<key>UUID</key>
+				<string>11111111-1111-1111-1111-111111111111</string>
+				<key>arguments</key>
+				<dict/>
+			</dict>
+		</dict>
+	</array>
+	<key>connectors</key>
+	<dict/>
+	<key>workflowMetaData</key>
+	<dict>
+            <key>serviceApplicationBundleID</key>
+            <string>com.apple.finder</string>
+            <key>serviceApplicationPath</key>
+            <string>/System/Library/CoreServices/Finder.app</string>
+            <key>serviceInputTypeIdentifier</key>
+            <string>com.apple.Automator.fileSystemObject</string>
+            <key>serviceOutputTypeIdentifier</key>
+            <string>com.apple.Automator.nothing</string>
+            <key>serviceProcessesInput</key>
+            <integer>0</integer>
+            <key>workflowTypeIdentifier</key>
+		<string>com.apple.Automator.servicesMenu</string>
+	</dict>
+</dict>
+</plist>
+"#,
+        xml_escape(&command),
+    );
+
+    std::fs::write(contents_dir.join("Info.plist"), info_plist)
+        .map_err(|e| format!("写 Info.plist 失败：{}", e))?;
+    std::fs::write(resources_dir.join("document.wflow"), document_wflow)
+        .map_err(|e| format!("写 document.wflow 失败：{}", e))?;
+
+    refresh_macos_services()?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn unregister_context_menu() -> Result<(), String> {
+    let workflow_dir = dirs::home_dir()
+        .ok_or("无法获取用户目录")?
+        .join("Library/Services/Open in AICode BAT GUI.workflow");
+    if workflow_dir.exists() {
+        std::fs::remove_dir_all(&workflow_dir)
+            .map_err(|e| format!("删除 Finder 右键失败：{}", e))?;
+    }
+    refresh_macos_services()?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn refresh_macos_services() -> Result<(), String> {
+    for args in [vec!["-flush"], vec!["-update"]] {
+        let status = std::process::Command::new("/System/Library/CoreServices/pbs")
+            .args(&args)
+            .status()
+            .map_err(|e| format!("刷新 Services 缓存失败：{}", e))?;
+        if !status.success() {
+            return Err(format!("刷新 Services 缓存失败：退出码 {:?}", status.code()));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_quick_action_command() -> Result<String, String> {
+    let executable = std::env::current_exe()
+        .map_err(|e| format!("无法获取当前程序路径：{}", e))?;
+
+    if let Some(app_bundle) = executable
+        .ancestors()
+        .find(|path| path.extension().is_some_and(|ext| ext == "app"))
+    {
+        return Ok(format!(
+            "open {} --args",
+            shell_single_quote(&app_bundle.to_string_lossy()),
+        ));
+    }
+
+    Ok(shell_single_quote(&executable.to_string_lossy()))
+}
+
+#[cfg(target_os = "macos")]
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 // ── 数据备份 ────────────────────────────────────────────────────────────────
 /// 备份到指定目录
 fn backup_to_directory(backup_dir: &std::path::Path, config_path: &str, keychain_path: &str) -> Result<usize, String> {
@@ -1489,7 +1935,14 @@ fn open_backup_directory(config_path: &str, extra_backup_dir: Option<&str>) -> R
                 .spawn()
                 .map_err(|e| format!("打开默认备份目录失败：{}", e))?;
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
+        {
+            Command::new("open")
+                .arg(&backup_path)
+                .spawn()
+                .map_err(|e| format!("打开默认备份目录失败：{}", e))?;
+        }
+        #[cfg(all(not(windows), not(target_os = "macos")))]
         {
             Command::new("xdg-open")
                 .arg(&backup_path)
@@ -1511,7 +1964,14 @@ fn open_backup_directory(config_path: &str, extra_backup_dir: Option<&str>) -> R
                     .spawn()
                     .map_err(|e| format!("打开额外备份目录失败：{}", e))?;
             }
-            #[cfg(not(windows))]
+            #[cfg(target_os = "macos")]
+            {
+                Command::new("open")
+                    .arg(&extra_path_str)
+                    .spawn()
+                    .map_err(|e| format!("打开额外备份目录失败：{}", e))?;
+            }
+            #[cfg(all(not(windows), not(target_os = "macos")))]
             {
                 Command::new("xdg-open")
                     .arg(&extra_path_str)

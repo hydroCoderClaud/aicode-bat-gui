@@ -50,7 +50,68 @@ pub fn launch_cli(
         }
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script_path = std::env::temp_dir()
+            .join(format!("aicode_launcher_{}.command", uuid::Uuid::new_v4()));
+        let mut lines = vec![
+            "#!/bin/zsh".to_string(),
+            "set -e".to_string(),
+        ];
+
+        for (key, value) in &api_env {
+            lines.push(format!(
+                "export {}='{}'",
+                key,
+                value.replace('\'', "'\\''"),
+            ));
+        }
+
+        if !directory.is_empty() {
+            lines.push(format!(
+                "cd '{}'",
+                directory.replace('\'', "'\\''"),
+            ));
+        }
+
+        lines.push("set +e".to_string());
+        lines.push(command.clone());
+        lines.push("exit_code=$?".to_string());
+        lines.push("echo".to_string());
+        lines.push(r#"echo "Command exited with status ${exit_code}. Interactive shell remains open.""#.to_string());
+        lines.push(r#"exec /bin/zsh -i"#.to_string());
+        let script = lines.join("\n") + "\n";
+
+        std::fs::write(&script_path, script)
+            .map_err(|e| format!("写临时脚本失败：{}", e))?;
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("设置脚本权限失败：{}", e))?;
+
+        let cleanup_path = script_path.clone();
+        match Command::new("open")
+            .arg("-a")
+            .arg("Terminal")
+            .arg(&script_path)
+            .spawn()
+        {
+            Ok(_) => {
+                std::thread::spawn(move || {
+                    for _ in 0..120 {
+                        if std::fs::remove_file(&cleanup_path).is_ok() {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    }
+                });
+                Ok(format!("已启动：{} @ {}", config.name, directory))
+            }
+            Err(e) => Err(format!("启动失败：{}", e)),
+        }
+    }
+
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
     {
         let mut parts: Vec<String> = api_env
             .iter()

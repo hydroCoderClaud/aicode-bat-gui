@@ -61,6 +61,37 @@ pub struct ConfigManager {
     pub config_path: String,
 }
 
+fn fill_known_tool_defaults(tool: &mut Tool) -> bool {
+    let command = tool.command.trim().to_lowercase();
+    let vendor = tool.vendor.trim().to_lowercase();
+    let is_claude = command == "claude" || vendor.contains("claude");
+
+    if !is_claude {
+        return false;
+    }
+
+    let mut changed = false;
+
+    if tool.env_base_url.trim().is_empty() {
+        tool.env_base_url = "ANTHROPIC_BASE_URL".to_string();
+        changed = true;
+    }
+    if tool.env_auth_token.trim().is_empty() {
+        tool.env_auth_token = "ANTHROPIC_AUTH_TOKEN".to_string();
+        changed = true;
+    }
+    if tool.env_api_key.trim().is_empty() {
+        tool.env_api_key = "ANTHROPIC_API_KEY".to_string();
+        changed = true;
+    }
+    if tool.env_proxy.trim().is_empty() {
+        tool.env_proxy = "HTTPS_PROXY".to_string();
+        changed = true;
+    }
+
+    changed
+}
+
 impl ConfigManager {
     pub fn new(config_path: String) -> Self {
         let mut manager = Self {
@@ -88,6 +119,7 @@ impl ConfigManager {
                 }
             }
         }
+        self.backfill_known_tools();
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -150,6 +182,16 @@ impl ConfigManager {
         let _ = self.save();
     }
 
+    fn backfill_known_tools(&mut self) {
+        let mut changed = false;
+        for tool in &mut self.data.tools {
+            changed |= fill_known_tool_defaults(tool);
+        }
+        if changed {
+            let _ = self.save();
+        }
+    }
+
     pub fn find_config(&self, config_id: &str) -> Option<&Config> {
         self.data.configs.iter().find(|c| c.id == config_id)
     }
@@ -175,21 +217,24 @@ impl ConfigManager {
         let mut api_env = HashMap::new();
 
         if let Some(tool) = self.find_tool(&config.tool) {
-            if !config.base_url.is_empty() && !tool.env_base_url.is_empty() {
-                api_env.insert(tool.env_base_url.clone(), config.base_url.clone());
+            let mut resolved_tool = tool.clone();
+            fill_known_tool_defaults(&mut resolved_tool);
+
+            if !config.base_url.is_empty() && !resolved_tool.env_base_url.is_empty() {
+                api_env.insert(resolved_tool.env_base_url.clone(), config.base_url.clone());
             }
             if !config.key.is_empty() {
                 let env_key = if config.key_type == "auth_token" {
-                    tool.env_auth_token.clone()
+                    resolved_tool.env_auth_token.clone()
                 } else {
-                    tool.env_api_key.clone()
+                    resolved_tool.env_api_key.clone()
                 };
                 if !env_key.is_empty() {
                     api_env.insert(env_key, config.key.clone());
                 }
             }
-            if !config.proxy.is_empty() && !tool.env_proxy.is_empty() {
-                api_env.insert(tool.env_proxy.clone(), config.proxy.clone());
+            if !config.proxy.is_empty() && !resolved_tool.env_proxy.is_empty() {
+                api_env.insert(resolved_tool.env_proxy.clone(), config.proxy.clone());
             }
         }
 

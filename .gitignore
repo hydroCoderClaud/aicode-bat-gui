@@ -3,6 +3,7 @@ target/
 
 # 发布目录（含 exe 和带密钥的配置文件）
 /exe/
+/dist/
 
 # 配置文件含 API 密钥，不提交
 launcher_config.json

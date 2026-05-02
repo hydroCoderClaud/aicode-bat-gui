@@ -37,6 +37,16 @@ cargo build --release
 cp target/release/aicode-bat-gui.exe exe/aicode-bat-gui.exe
 ```
 
+### macOS App
+
+```bash
+chmod +x scripts/build-macos-app.sh
+./scripts/build-macos-app.sh
+open "dist/AICode BAT GUI.app"
+```
+
+生成产物位于 `dist/AICode BAT GUI.app`。
+
 ### 项目结构
 
 | 文件 | 职责 |
@@ -53,5 +63,6 @@ cp target/release/aicode-bat-gui.exe exe/aicode-bat-gui.exe
 
 ## 平台支持
 
-- **Windows**：完全支持
-- **macOS/Linux**：不支持（Windows 专用）
+- **Windows**：完全支持，包含右键菜单注册、托盘隐藏与恢复
+- **macOS**：可运行的兼容版本，支持配置管理、密码助手、在 `Terminal.app` 中启动 CLI，以及通过应用内按钮安装 Finder 右键 Quick Action
+- **Linux**：基础兼容，非主要支持平台
