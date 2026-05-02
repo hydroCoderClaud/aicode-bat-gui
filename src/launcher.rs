@@ -89,24 +89,13 @@ pub fn launch_cli(
         std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
             .map_err(|e| format!("设置脚本权限失败：{}", e))?;
 
-        let cleanup_path = script_path.clone();
         match Command::new("open")
             .arg("-a")
             .arg("Terminal")
             .arg(&script_path)
             .spawn()
         {
-            Ok(_) => {
-                std::thread::spawn(move || {
-                    for _ in 0..120 {
-                        if std::fs::remove_file(&cleanup_path).is_ok() {
-                            break;
-                        }
-                        std::thread::sleep(std::time::Duration::from_secs(1));
-                    }
-                });
-                Ok(format!("已启动：{} @ {}", config.name, directory))
-            }
+            Ok(_) => Ok(format!("已启动：{} @ {}", config.name, directory)),
             Err(e) => Err(format!("启动失败：{}", e)),
         }
     }
