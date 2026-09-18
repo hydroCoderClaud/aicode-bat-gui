@@ -75,7 +75,7 @@ fn main() -> eframe::Result {
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("CLI 启动管理器")
-        .with_inner_size([860.0, 600.0])
+        .with_inner_size([1024.0, 768.0])
         .with_min_inner_size([640.0, 420.0]);
     if let Some(icon) = icon_data {
         viewport = viewport.with_icon(Arc::new(icon));
@@ -145,8 +145,6 @@ struct LauncherApp {
     status:         String,
     dark_mode:      bool,
     pending_delete: bool,
-    show_tool_mgr:  bool,
-    new_tool_form:  NewToolForm,
     config_search:  String,  // 配置列表搜索框
     // 系统托盘
     #[cfg(windows)]
@@ -165,16 +163,6 @@ struct LauncherApp {
     kc_filter_tag:      String,
     kc_visible_fields:  HashSet<usize>,
     kc_pending_delete:  bool,
-}
-
-#[derive(Clone, Default)]
-struct NewToolForm {
-    vendor:         String,
-    command:        String,
-    env_base_url:   String,
-    env_auth_token: String,
-    env_api_key:    String,
-    env_proxy:      String,
 }
 
 #[derive(Clone, Default)]
@@ -233,8 +221,6 @@ impl LauncherApp {
             status:         "就绪".into(),
             dark_mode:      false,
             pending_delete: false,
-            show_tool_mgr:  false,
-            new_tool_form:  NewToolForm::default(),
             config_search:  String::new(),
             #[cfg(windows)]
             tray_icon:      None,
@@ -976,9 +962,6 @@ impl eframe::App for LauncherApp {
         let mut do_new            = false;
         let mut do_move_up        = false;
         let mut do_move_down      = false;
-        let mut do_toggle_tool_mgr = false;
-        let mut do_delete_tool: Option<String> = None;
-        let mut do_add_tool       = false;
 
         // ── 左侧配置列表 ──────────────────────────────────────────────────────
         egui::SidePanel::left("sidebar").width_range(200.0..=350.0).show(ctx, |ui| {
@@ -1035,9 +1018,6 @@ impl eframe::App for LauncherApp {
 
         // ── 右侧表单 ──────────────────────────────────────────────────────────
         egui::CentralPanel::default().show(ctx, |ui| {
-            // 提前取出只读数据，避免与 self.form 的可变借用冲突
-            let tools: Vec<config::Tool> = self.config_mgr.data.tools.clone();
-
             match &mut self.form {
                 None => {
                     ui.vertical_centered(|ui| {
@@ -1063,21 +1043,8 @@ impl eframe::App for LauncherApp {
                                         .desired_width(f32::INFINITY));
                                 });
 
-                                form_row(ui, "工具:", |ui| {
-                                    egui::ComboBox::new("tool_cb", "")
-                                        .selected_text(&form.tool)
-                                        .show_ui(ui, |ui| {
-                                            for t in &tools {
-                                                ui.selectable_value(
-                                                    &mut form.tool,
-                                                    t.command.clone(),
-                                                    format!("{} ({})", t.vendor, t.command),
-                                                );
-                                            }
-                                        });
-                                    if ui.small_button("管理").clicked() {
-                                        do_toggle_tool_mgr = true;
-                                    }
+                                form_row(ui, "CLI:", |ui| {
+                                    ui.label(config::CLAUDE_COMMAND);
                                 });
 
                                 form_row(ui, "API 地址:", |ui| {
@@ -1246,23 +1213,8 @@ impl eframe::App for LauncherApp {
             }
         });
 
-        // ── 工具管理浮窗 ──────────────────────────────────────────────────────
-        {
-            let tools_snap = self.config_mgr.data.tools.clone();
-            tool_manager_window(
-                ctx,
-                &mut self.show_tool_mgr,
-                &tools_snap,
-                &mut self.new_tool_form,
-                &mut do_delete_tool,
-                &mut do_add_tool,
-            );
-        }
-
         // ── 处理动作（所有 panel 借用已释放）────────────────────────────────
         if do_new {
-            let tool = self.config_mgr.data.tools.first()
-                .map(|t| t.command.clone()).unwrap_or_default();
             // 优先使用当前表单中的目录，回退到配置文件记录的目录
             let dir = self.form.as_ref()
                 .map(|f| f.directory.clone())
@@ -1272,7 +1224,7 @@ impl eframe::App for LauncherApp {
             self.pending_delete = false;
             self.form = Some(EditForm {
                 key_type: "auth_token".into(),
-                tool,
+                tool: config::CLAUDE_COMMAND.into(),
                 directory: dir,
                 ..Default::default()
             });
@@ -1310,27 +1262,8 @@ impl eframe::App for LauncherApp {
         if do_delete_confirm { self.delete(); }
         if do_delete_cancel  { self.pending_delete = false; }
         if do_launch         { self.launch(); }
-        if do_toggle_tool_mgr { self.show_tool_mgr = !self.show_tool_mgr; }
         if do_move_up   { self.config_mgr.move_config_up(&self.selected_id.clone()); }
         if do_move_down { self.config_mgr.move_config_down(&self.selected_id.clone()); }
-        if let Some(cmd) = do_delete_tool { self.config_mgr.delete_tool(&cmd); }
-        if do_add_tool {
-            let f = &self.new_tool_form;
-            if !f.command.trim().is_empty() && !f.vendor.trim().is_empty() {
-                self.config_mgr.add_tool(config::Tool {
-                    vendor:         f.vendor.trim().to_string(),
-                    command:        f.command.trim().to_string(),
-                    env_base_url:   f.env_base_url.trim().to_string(),
-                    env_auth_token: f.env_auth_token.trim().to_string(),
-                    env_api_key:    f.env_api_key.trim().to_string(),
-                    env_proxy:      f.env_proxy.trim().to_string(),
-                });
-                self.new_tool_form = NewToolForm::default();
-                self.status = "工具已添加".into();
-            } else {
-                self.status = "名称和命令不能为空".into();
-            }
-        }
 
         } // ConfigManager
         AppTab::Keychain => {
@@ -1347,61 +1280,6 @@ fn form_row(ui: &mut egui::Ui, label: &str, add_content: impl FnOnce(&mut egui::
     ui.label(label);
     ui.horizontal(add_content);
     ui.end_row();
-}
-
-fn tool_manager_window(
-    ctx: &egui::Context,
-    visible: &mut bool,
-    tools: &[config::Tool],
-    new_form: &mut NewToolForm,
-    do_delete: &mut Option<String>,
-    do_add: &mut bool,
-) {
-    if !*visible { return; }
-    egui::Window::new("⚙ 工具管理")
-        .collapsible(false)
-        .resizable(false)
-        .min_width(420.0)
-        .open(visible)
-        .show(ctx, |ui| {
-            // 已有工具列表
-            egui::Grid::new("tool_list")
-                .num_columns(3)
-                .spacing([12.0, 4.0])
-                .show(ui, |ui| {
-                    for t in tools {
-                        ui.label(&t.vendor);
-                        ui.monospace(&t.command);
-                        if ui.small_button("🗑 删除").clicked() {
-                            *do_delete = Some(t.command.clone());
-                        }
-                        ui.end_row();
-                    }
-                });
-
-            ui.separator();
-            ui.label("添加新工具：");
-            ui.add_space(2.0);
-
-            egui::Grid::new("new_tool_form")
-                .num_columns(2)
-                .spacing([8.0, 4.0])
-                .min_col_width(90.0)
-                .show(ui, |ui| {
-                    let w = 240.0;
-                    ui.label("名称:"); ui.add(egui::TextEdit::singleline(&mut new_form.vendor).hint_text("如 Moonshot").desired_width(w)); ui.end_row();
-                    ui.label("命令:"); ui.add(egui::TextEdit::singleline(&mut new_form.command).hint_text("如 kimi").desired_width(w)); ui.end_row();
-                    ui.label("Base URL 变量:"); ui.add(egui::TextEdit::singleline(&mut new_form.env_base_url).hint_text("如 ANTHROPIC_BASE_URL").desired_width(w)); ui.end_row();
-                    ui.label("Auth Token 变量:"); ui.add(egui::TextEdit::singleline(&mut new_form.env_auth_token).hint_text("如 ANTHROPIC_AUTH_TOKEN").desired_width(w)); ui.end_row();
-                    ui.label("API Key 变量:"); ui.add(egui::TextEdit::singleline(&mut new_form.env_api_key).hint_text("如 ANTHROPIC_API_KEY").desired_width(w)); ui.end_row();
-                    ui.label("代理变量:"); ui.add(egui::TextEdit::singleline(&mut new_form.env_proxy).hint_text("如 HTTPS_PROXY").desired_width(w)); ui.end_row();
-                });
-
-            ui.add_space(4.0);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("➕ 添加").clicked() { *do_add = true; }
-            });
-        });
 }
 
 fn cfg_to_form(cfg: &config::Config, last_dir: &str) -> EditForm {
@@ -1472,7 +1350,7 @@ fn resolve_config_path() -> String {
         return app_cfg.to_string_lossy().into_owned();
     }
 
-    let default_content = r#"{"global":{"last_directory":"","default_config":"","backup_directory":""},"tools":[],"configs":[],"env_hints":"ANTHROPIC_MODEL=Claude - 覆盖默认模型\nANTHROPIC_DEFAULT_OPUS_MODEL=Claude - 映射 Opus 到指定模型\nANTHROPIC_DEFAULT_SONNET_MODEL=Claude - 映射 Sonnet 到指定模型\nANTHROPIC_DEFAULT_HAIKU_MODEL=Claude - 映射 Haiku 到指定模型\nCLAUDE_AUTOCOMPACT_PCT_OVERRIDE=Claude - 上下文压缩触发百分比（0-100）\nOPENAI_MODEL=Qwen/OpenAI 兼容 - 覆盖默认模型\nGEMINI_MODEL=Gemini - 覆盖默认模型"}"#;
+    let default_content = r#"{"global":{"last_directory":"","default_config":"","backup_directory":""},"tools":[],"configs":[],"env_hints":"ANTHROPIC_MODEL=Claude - 覆盖默认模型\nANTHROPIC_DEFAULT_OPUS_MODEL=Claude - 映射 Opus 到指定模型\nANTHROPIC_DEFAULT_SONNET_MODEL=Claude - 映射 Sonnet 到指定模型\nANTHROPIC_DEFAULT_HAIKU_MODEL=Claude - 映射 Haiku 到指定模型\nCLAUDE_AUTOCOMPACT_PCT_OVERRIDE=Claude - 上下文压缩触发百分比（0-100）"}"#;
     let _ = std::fs::write(&app_cfg, default_content);
     app_cfg.to_string_lossy().into_owned()
 }
@@ -1500,7 +1378,7 @@ fn resolve_config_path() -> String {
     }
 
     // 都不存在时，尝试在 exe 目录创建
-    if std::fs::write(&local, r#"{"global":{"last_directory":"","default_config":"","backup_directory":""},"tools":[],"configs":[],"env_hints":"ANTHROPIC_MODEL=Claude - 覆盖默认模型\nANTHROPIC_DEFAULT_OPUS_MODEL=Claude - 映射 Opus 到指定模型\nANTHROPIC_DEFAULT_SONNET_MODEL=Claude - 映射 Sonnet 到指定模型\nANTHROPIC_DEFAULT_HAIKU_MODEL=Claude - 映射 Haiku 到指定模型\nCLAUDE_AUTOCOMPACT_PCT_OVERRIDE=Claude - 上下文压缩触发百分比（0-100）\nOPENAI_MODEL=Qwen/OpenAI 兼容 - 覆盖默认模型\nGEMINI_MODEL=Gemini - 覆盖默认模型"}"#).is_ok() {
+    if std::fs::write(&local, r#"{"global":{"last_directory":"","default_config":"","backup_directory":""},"tools":[],"configs":[],"env_hints":"ANTHROPIC_MODEL=Claude - 覆盖默认模型\nANTHROPIC_DEFAULT_OPUS_MODEL=Claude - 映射 Opus 到指定模型\nANTHROPIC_DEFAULT_SONNET_MODEL=Claude - 映射 Sonnet 到指定模型\nANTHROPIC_DEFAULT_HAIKU_MODEL=Claude - 映射 Haiku 到指定模型\nCLAUDE_AUTOCOMPACT_PCT_OVERRIDE=Claude - 上下文压缩触发百分比（0-100）"}"#).is_ok() {
         return local.to_string_lossy().into_owned();
     }
 

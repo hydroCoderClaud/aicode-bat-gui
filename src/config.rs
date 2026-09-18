@@ -2,6 +2,15 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, BTreeMap};
 
+/// AICLI 只服务 Claude Code，启动命令与环境变量名固定
+pub const CLAUDE_COMMAND: &str = "claude";
+const ENV_BASE_URL:   &str = "ANTHROPIC_BASE_URL";
+const ENV_AUTH_TOKEN: &str = "ANTHROPIC_AUTH_TOKEN";
+const ENV_API_KEY:    &str = "ANTHROPIC_API_KEY";
+const ENV_PROXY:      &str = "HTTPS_PROXY";
+
+/// 历史遗留的工具定义。AICLI 已收敛为 Claude 专用，此结构不再参与启动逻辑，
+/// 仅用于读写 JSON 时原样保留旧配置数据。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tool {
     pub vendor: String,
@@ -40,9 +49,7 @@ fn default_env_hints() -> String {
      ANTHROPIC_DEFAULT_OPUS_MODEL=Claude - 映射 Opus 到指定模型\n\
      ANTHROPIC_DEFAULT_SONNET_MODEL=Claude - 映射 Sonnet 到指定模型\n\
      ANTHROPIC_DEFAULT_HAIKU_MODEL=Claude - 映射 Haiku 到指定模型\n\
-     CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=Claude - 上下文压缩触发百分比（0-100）\n\
-     OPENAI_MODEL=Qwen/OpenAI 兼容 - 覆盖默认模型\n\
-     GEMINI_MODEL=Gemini - 覆盖默认模型"
+     CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=Claude - 上下文压缩触发百分比（0-100）"
         .to_string()
 }
 
@@ -59,37 +66,6 @@ pub struct LauncherConfigData {
 pub struct ConfigManager {
     pub data: LauncherConfigData,
     pub config_path: String,
-}
-
-fn fill_known_tool_defaults(tool: &mut Tool) -> bool {
-    let command = tool.command.trim().to_lowercase();
-    let vendor = tool.vendor.trim().to_lowercase();
-    let is_claude = command == "claude" || vendor.contains("claude");
-
-    if !is_claude {
-        return false;
-    }
-
-    let mut changed = false;
-
-    if tool.env_base_url.trim().is_empty() {
-        tool.env_base_url = "ANTHROPIC_BASE_URL".to_string();
-        changed = true;
-    }
-    if tool.env_auth_token.trim().is_empty() {
-        tool.env_auth_token = "ANTHROPIC_AUTH_TOKEN".to_string();
-        changed = true;
-    }
-    if tool.env_api_key.trim().is_empty() {
-        tool.env_api_key = "ANTHROPIC_API_KEY".to_string();
-        changed = true;
-    }
-    if tool.env_proxy.trim().is_empty() {
-        tool.env_proxy = "HTTPS_PROXY".to_string();
-        changed = true;
-    }
-
-    changed
 }
 
 impl ConfigManager {
@@ -119,7 +95,7 @@ impl ConfigManager {
                 }
             }
         }
-        self.backfill_known_tools();
+        self.prune_legacy_env_hints();
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -172,33 +148,23 @@ impl ConfigManager {
         }
     }
 
-    pub fn add_tool(&mut self, tool: Tool) {
-        self.data.tools.push(tool);
-        let _ = self.save();
-    }
-
-    pub fn delete_tool(&mut self, command: &str) {
-        self.data.tools.retain(|t| t.command != command);
-        let _ = self.save();
-    }
-
-    fn backfill_known_tools(&mut self) {
-        let mut changed = false;
-        for tool in &mut self.data.tools {
-            changed |= fill_known_tool_defaults(tool);
+    /// 旧版本的常用环境变量提示里含非 Claude CLI 的条目，这里清理掉
+    fn prune_legacy_env_hints(&mut self) {
+        let hints = &self.data.env_hints;
+        if !hints.contains("OPENAI_MODEL") && !hints.contains("GEMINI_MODEL") {
+            return;
         }
-        if changed {
-            let _ = self.save();
-        }
+        let cleaned = hints
+            .lines()
+            .filter(|l| !l.contains("OPENAI_MODEL") && !l.contains("GEMINI_MODEL"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.data.env_hints = cleaned;
+        let _ = self.save();
     }
 
     pub fn find_config(&self, config_id: &str) -> Option<&Config> {
         self.data.configs.iter().find(|c| c.id == config_id)
-    }
-
-    // --- tools 操作 ---
-    pub fn find_tool(&self, command: &str) -> Option<&Tool> {
-        self.data.tools.iter().find(|t| t.command == command)
     }
 
     // --- global 操作 ---
@@ -213,29 +179,19 @@ impl ConfigManager {
     }
 
     // --- 构建环境 ---
+    /// 固定注入 Claude Code 的环境变量
     pub fn build_api_env(&self, config: &Config) -> HashMap<String, String> {
         let mut api_env = HashMap::new();
 
-        if let Some(tool) = self.find_tool(&config.tool) {
-            let mut resolved_tool = tool.clone();
-            fill_known_tool_defaults(&mut resolved_tool);
-
-            if !config.base_url.is_empty() && !resolved_tool.env_base_url.is_empty() {
-                api_env.insert(resolved_tool.env_base_url.clone(), config.base_url.clone());
-            }
-            if !config.key.is_empty() {
-                let env_key = if config.key_type == "auth_token" {
-                    resolved_tool.env_auth_token.clone()
-                } else {
-                    resolved_tool.env_api_key.clone()
-                };
-                if !env_key.is_empty() {
-                    api_env.insert(env_key, config.key.clone());
-                }
-            }
-            if !config.proxy.is_empty() && !resolved_tool.env_proxy.is_empty() {
-                api_env.insert(resolved_tool.env_proxy.clone(), config.proxy.clone());
-            }
+        if !config.base_url.is_empty() {
+            api_env.insert(ENV_BASE_URL.to_string(), config.base_url.clone());
+        }
+        if !config.key.is_empty() {
+            let env_key = if config.key_type == "auth_token" { ENV_AUTH_TOKEN } else { ENV_API_KEY };
+            api_env.insert(env_key.to_string(), config.key.clone());
+        }
+        if !config.proxy.is_empty() {
+            api_env.insert(ENV_PROXY.to_string(), config.proxy.clone());
         }
 
         for (k, v) in &config.extra_env {
@@ -245,15 +201,12 @@ impl ConfigManager {
         api_env
     }
 
+    /// 启动命令固定为 claude，配置里的 tool 字段仅作历史记录
     pub fn build_command(&self, config: &Config) -> String {
-        let tool_cmd = self.find_tool(&config.tool)
-            .map(|t| t.command.clone())
-            .unwrap_or_else(|| config.tool.clone());
-
         if config.command_args.is_empty() {
-            tool_cmd
+            CLAUDE_COMMAND.to_string()
         } else {
-            format!("{} {}", tool_cmd, config.command_args)
+            format!("{} {}", CLAUDE_COMMAND, config.command_args)
         }
     }
 }

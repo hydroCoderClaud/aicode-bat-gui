@@ -1,11 +1,11 @@
 # aicode-bat-gui
 
-Windows 桌面 GUI 应用，用于管理和启动 AI 编码 CLI 工具（Claude Code、Qwen Coder、Gemini CLI 等）。
+Windows 桌面 GUI 应用，用于管理和启动 Claude Code，并保存常用网站密码。
 
 ## 功能
 
-- **多配置管理**：为不同的 AI CLI 工具配置多个 profile，支持不同的 API 端点、密钥和代理设置
-- **一键启动**：在新 CMD 窗口中启动 CLI 工具，自动注入环境变量
+- **多配置管理**：为 Claude Code 配置多个 profile，支持不同的 API 端点、密钥和代理设置
+- **一键启动**：在新终端窗口中启动 Claude Code，自动注入 `ANTHROPIC_*` 环境变量
 - **API 连接测试**：支持 Anthropic、OpenAI 兼容、Gemini 等多种 API 的连接测试
 - **系统托盘**：最小化到托盘，支持快速恢复
 - **右键菜单**：在 Windows 文件浏览器中右键快速启动

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`aicode-bat-gui` is a Windows desktop GUI application for managing and launching AI coding CLI tools (Claude Code, Qwen Coder, Gemini CLI, etc.). Users configure multiple "profiles" with different API endpoints, keys, and proxy settings, then launch the CLI tool in a new CMD window with the correct environment variables injected.
+`aicode-bat-gui` is a Windows desktop GUI application for managing Claude Code launch profiles and a local password vault. Users configure multiple profiles with different API endpoints, keys, and proxy settings, then launch Claude Code in a new terminal window with the correct environment variables injected.
 
 ## Tech Stack
 
@@ -55,11 +55,13 @@ Structure:
 }
 ```
 
+`tools` 与 `configs[].tool` 是历史字段，仅用于原样保留旧数据，不再参与启动逻辑。
+
 ### Key Design Decisions
 
 - **Single instance**: 使用 Win32 命名 Mutex (`Global\aicode-bat-gui-single-instance`) 确保只运行一个实例，重复启动时激活已有窗口。
 - **System tray**: 关闭按钮隐藏窗口到托盘（`ShowWindow(SW_HIDE)`），而非退出程序。使用 `tray_icon::set_event_handler` 回调处理托盘事件（双击恢复、右键菜单退出），因为窗口隐藏后 egui 的 `update()` 不再被调用，轮询模式无法工作。
 - **Launch mechanism**: `.bat` 文件写入 `%TEMP%` 并在新 CMD 窗口执行，用户可看到输出并与 CLI 交互。
-- **Tool definitions are data-driven**: 新增 CLI 工具只需在 `tools` 数组添加条目，无需改代码。
+- **Tool definitions are data-driven**: `tools` 与 `configs[].tool` 仅作历史数据保留，启动逻辑不再读取。
 - **Window icon**: 窗口标题栏、任务栏、托盘图标统一使用 `assets/app.ico`。
 - **Right-click menu**: 使用 Windows 注册表的经典 shell verb 方式实现，无需 COM DLL。

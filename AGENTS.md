@@ -4,7 +4,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## Project Overview
 
-`aicode-bat-gui` is a Windows desktop GUI application for managing and launching AI coding CLI tools (Codex, Qwen Coder, Gemini CLI, etc.). Users configure multiple "profiles" with different API endpoints, keys, and proxy settings, then launch the CLI tool in a new CMD window with the correct environment variables injected.
+`aicode-bat-gui` is a Windows desktop GUI application for managing Claude Code launch profiles and a local password vault. Users configure multiple profiles with different API endpoints, keys, and proxy settings, then launch Claude Code in a new terminal window with the correct environment variables injected.
 
 ## Tech Stack
 
@@ -50,15 +50,17 @@ Structure:
 ```json
 {
   "global": { "last_directory": "...", "default_config": "<id>" },
-  "tools": [{ "vendor": "Anthropic", "command": "Codex", "env_base_url": "ANTHROPIC_BASE_URL", "env_auth_token": "ANTHROPIC_AUTH_TOKEN", "env_api_key": "ANTHROPIC_API_KEY", "env_proxy": "HTTPS_PROXY" }],
-  "configs": [{ "id": "abc12345", "name": "My Config", "tool": "Codex", "base_url": "...", "key": "...", "key_type": "auth_token|api_key", "proxy": "...", "extra_env": {}, "command_args": "" }]
+  "tools": [{ "vendor": "Anthropic", "command": "claude", "env_base_url": "ANTHROPIC_BASE_URL", "env_auth_token": "ANTHROPIC_AUTH_TOKEN", "env_api_key": "ANTHROPIC_API_KEY", "env_proxy": "HTTPS_PROXY" }],
+  "configs": [{ "id": "abc12345", "name": "My Config", "tool": "claude", "base_url": "...", "key": "...", "key_type": "auth_token|api_key", "proxy": "...", "extra_env": {}, "command_args": "" }]
 }
 ```
+
+`tools` 与 `configs[].tool` 是历史字段，仅用于原样保留旧数据，不再参与启动逻辑。
 
 ### Key Design Decisions
 
 - **Single instance**: 使用 Win32 命名 Mutex (`Global\aicode-bat-gui-single-instance`) 确保只运行一个实例，重复启动时激活已有窗口。
 - **System tray**: 关闭按钮隐藏窗口到托盘（`ShowWindow(SW_HIDE)`），而非退出程序。使用 `tray_icon::set_event_handler` 回调处理托盘事件（双击恢复、右键菜单退出），因为窗口隐藏后 egui 的 `update()` 不再被调用，轮询模式无法工作。
 - **Launch mechanism**: `.bat` 文件写入 `%TEMP%` 并在新 CMD 窗口执行，用户可看到输出并与 CLI 交互。
-- **Tool definitions are data-driven**: 新增 CLI 工具只需在 `tools` 数组添加条目，无需改代码。
+- **AICLI 只服务 Claude Code**: 启动命令固定为 `claude`，环境变量固定为 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` 或 `ANTHROPIC_API_KEY` / `HTTPS_PROXY`，`extra_env` 最后覆盖。配置里的 `tool` 字段不再影响启动结果。
 - **Window icon**: 窗口标题栏、任务栏、托盘图标统一使用 `assets/app.ico`。
